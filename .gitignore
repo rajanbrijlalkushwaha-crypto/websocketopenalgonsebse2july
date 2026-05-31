@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+*.egg-info/
+.env
+
+# Node
+node_modules/
+frontend/build/
+
+# Logs
+*.log
+nohup.out
+
+# Data files
+data/*.json
+data/*.db
+*.db
+
+# OS
+.DS_Store
+
+# Pipeline egg
+pipeline/pipeline.egg-info/

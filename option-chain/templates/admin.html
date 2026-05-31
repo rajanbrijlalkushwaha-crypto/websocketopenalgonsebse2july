@@ -1,0 +1,464 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Admin Panel — OpenAlgo Data Collector</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Segoe UI',Arial,sans-serif;background:#0f172a;color:#e2e8f0;min-height:100vh;}
+
+/* TOPBAR */
+.topbar{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:12px 24px;background:#1e293b;border-bottom:2px solid #334155;
+}
+.topbar h1{font-size:18px;font-weight:800;color:#38bdf8;}
+.topbar-right{display:flex;align-items:center;gap:12px;}
+.broker-badge{
+  background:#1e40af;color:#bfdbfe;padding:4px 12px;border-radius:20px;
+  font-size:12px;font-weight:700;
+}
+.nav-link{color:#94a3b8;text-decoration:none;font-size:13px;font-weight:600;}
+.nav-link:hover{color:#38bdf8;}
+
+/* MAIN */
+.main{padding:24px;max-width:1100px;margin:0 auto;}
+
+/* CARDS */
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px;margin-bottom:24px;}
+.card{
+  background:#1e293b;border:1px solid #334155;border-radius:10px;
+  padding:18px 20px;
+}
+.card-label{font-size:11px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:.5px;}
+.card-value{font-size:28px;font-weight:800;color:#f1f5f9;margin-top:4px;}
+.card-sub{font-size:12px;color:#94a3b8;margin-top:2px;}
+.card.green .card-value{color:#4ade80;}
+.card.red   .card-value{color:#f87171;}
+.card.blue  .card-value{color:#38bdf8;}
+.card.yellow .card-value{color:#fbbf24;}
+
+/* STATUS BAR */
+.status-bar{
+  display:flex;align-items:center;gap:16px;
+  background:#1e293b;border:1px solid #334155;border-radius:10px;
+  padding:16px 20px;margin-bottom:24px;
+}
+.status-dot{width:14px;height:14px;border-radius:50%;flex-shrink:0;}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+.dot-running{background:#4ade80;animation:pulse 1.5s infinite;}
+.dot-stopped{background:#f87171;}
+.dot-scheduled{background:#fbbf24;animation:pulse 2s infinite;}
+.status-text{font-size:16px;font-weight:800;}
+.status-sub{font-size:12px;color:#64748b;margin-top:2px;}
+
+/* CONTROL BUTTONS */
+.controls{display:flex;gap:12px;margin-left:auto;}
+.btn{
+  padding:10px 24px;border:none;border-radius:7px;font-size:14px;
+  font-weight:800;cursor:pointer;transition:all .15s;
+}
+.btn:hover{transform:translateY(-1px);box-shadow:0 4px 12px rgba(0,0,0,.3);}
+.btn:disabled{opacity:.5;cursor:not-allowed;transform:none;}
+.btn-start{background:#16a34a;color:#fff;}
+.btn-stop {background:#dc2626;color:#fff;}
+.btn-save {background:#2563eb;color:#fff;}
+.btn-reset{background:#475569;color:#fff;}
+
+/* SECTIONS */
+.section{background:#1e293b;border:1px solid #334155;border-radius:10px;margin-bottom:20px;}
+.section-header{
+  padding:14px 20px;border-bottom:1px solid #334155;
+  display:flex;align-items:center;justify-content:space-between;
+}
+.section-title{font-size:14px;font-weight:800;color:#f1f5f9;}
+.section-body{padding:20px;}
+
+/* SCHEDULE TABLE */
+.sched-table{width:100%;border-collapse:collapse;}
+.sched-table th{
+  background:#0f172a;padding:10px 14px;text-align:left;
+  font-size:11px;font-weight:700;color:#64748b;text-transform:uppercase;
+}
+.sched-table td{
+  padding:10px 14px;border-top:1px solid #334155;font-size:14px;
+}
+.sched-table input[type=time],
+.sched-table input[type=text]{
+  background:#0f172a;border:1px solid #475569;color:#f1f5f9;
+  padding:6px 10px;border-radius:5px;font-size:13px;width:100%;
+  outline:none;
+}
+.sched-table input:focus{border-color:#38bdf8;}
+.day-btn{
+  padding:4px 8px;border-radius:4px;font-size:11px;font-weight:700;
+  cursor:pointer;border:1px solid #475569;background:#0f172a;color:#94a3b8;
+  margin:2px;
+}
+.day-btn.active{background:#2563eb;color:#fff;border-color:#2563eb;}
+
+/* TOGGLE */
+.toggle-wrap{display:flex;align-items:center;gap:10px;}
+.toggle{position:relative;display:inline-block;width:48px;height:26px;}
+.toggle input{opacity:0;width:0;height:0;}
+.toggle-slider{
+  position:absolute;inset:0;background:#334155;border-radius:26px;
+  cursor:pointer;transition:.3s;
+}
+.toggle-slider:before{
+  content:'';position:absolute;width:20px;height:20px;
+  left:3px;bottom:3px;background:#fff;border-radius:50%;transition:.3s;
+}
+.toggle input:checked + .toggle-slider{background:#2563eb;}
+.toggle input:checked + .toggle-slider:before{transform:translateX(22px);}
+
+/* LIVE FEED */
+.feed-box{
+  background:#0f172a;border:1px solid #334155;border-radius:7px;
+  height:200px;overflow-y:auto;padding:10px;font-size:12px;
+  font-family:monospace;color:#94a3b8;
+}
+.feed-row{padding:2px 0;border-bottom:1px solid #1e293b;}
+.feed-row.new{color:#4ade80;}
+
+/* RESPONSIVE */
+@media(max-width:600px){
+  .cards{grid-template-columns:1fr 1fr;}
+  .controls{flex-direction:column;}
+}
+</style>
+</head>
+<body>
+
+<!-- TOPBAR -->
+<div class="topbar">
+  <h1>⚡ Data Collector — Admin Panel</h1>
+  <div class="topbar-right">
+    <span class="broker-badge" id="brokerBadge">Loading...</span>
+    <a href="/trading/option-chain" class="nav-link">→ Option Chain</a>
+  </div>
+</div>
+
+<div class="main">
+
+  <!-- STATUS BAR -->
+  <div class="status-bar">
+    <div class="status-dot dot-stopped" id="statusDot"></div>
+    <div>
+      <div class="status-text" id="statusText">STOPPED</div>
+      <div class="status-sub" id="statusSub">Data collection is not running</div>
+    </div>
+    <div class="controls">
+      <button class="btn btn-start" id="btnStart" onclick="controlCollector('start')">▶ Start</button>
+      <button class="btn btn-stop"  id="btnStop"  onclick="controlCollector('stop')" disabled>■ Stop</button>
+    </div>
+  </div>
+
+  <!-- STAT CARDS -->
+  <div class="cards">
+    <div class="card blue">
+      <div class="card-label">Ticks / Second</div>
+      <div class="card-value" id="cardTps">0</div>
+      <div class="card-sub">live throughput</div>
+    </div>
+    <div class="card green">
+      <div class="card-label">Total Ticks Saved</div>
+      <div class="card-value" id="cardTotal">0</div>
+      <div class="card-sub">this session</div>
+    </div>
+    <div class="card yellow">
+      <div class="card-label">Symbols Live</div>
+      <div class="card-value" id="cardSymbols">0</div>
+      <div class="card-sub">receiving data</div>
+    </div>
+    <div class="card">
+      <div class="card-label">DB Size</div>
+      <div class="card-value" id="cardDb">0 KB</div>
+      <div class="card-sub">ticks.db on disk</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Uptime</div>
+      <div class="card-value" id="cardUptime">0s</div>
+      <div class="card-sub">since last start</div>
+    </div>
+  </div>
+
+  <!-- AUTO SCHEDULE -->
+  <div class="section">
+    <div class="section-header">
+      <span class="section-title">🕐 Auto Schedule</span>
+      <div class="toggle-wrap">
+        <span style="font-size:13px;color:#94a3b8;">Auto start/stop by market hours</span>
+        <label class="toggle">
+          <input type="checkbox" id="autoToggle" onchange="toggleAuto(this.checked)"/>
+          <span class="toggle-slider"></span>
+        </label>
+      </div>
+    </div>
+    <div class="section-body">
+      <table class="sched-table" id="schedTable">
+        <thead>
+          <tr>
+            <th>Market</th>
+            <th>Start Time</th>
+            <th>Stop Time</th>
+            <th>Days</th>
+          </tr>
+        </thead>
+        <tbody id="schedBody"></tbody>
+      </table>
+      <div style="margin-top:16px;display:flex;gap:10px;">
+        <button class="btn btn-save" onclick="saveSchedule()">💾 Save Schedule</button>
+        <button class="btn btn-reset" onclick="loadSchedule()">↺ Reset</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- LIVE TICK FEED -->
+  <div class="section">
+    <div class="section-header">
+      <span class="section-title">📡 Live Tick Feed</span>
+      <button class="btn btn-reset" style="padding:5px 14px;font-size:12px;" onclick="clearFeed()">Clear</button>
+    </div>
+    <div class="section-body" style="padding:12px;">
+      <div class="feed-box" id="feedBox">
+        <div style="color:#475569;text-align:center;padding-top:80px;">Start collection to see live ticks…</div>
+      </div>
+    </div>
+  </div>
+
+</div><!-- /main -->
+
+<script>
+var _schedConfig = null;
+var _pollInterval = null;
+var _feedPoll = null;
+var DAYS = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+
+/* ── INIT ── */
+(function(){
+  fetchBrokerStatus();
+  loadSchedule();
+  startPolling();
+})();
+
+/* ── BROKER STATUS ── */
+function fetchBrokerStatus(){
+  fetch('/api/broker-status')
+    .then(r => r.json())
+    .then(d => {
+      var b = (d.broker||'unknown').toUpperCase();
+      var badge = document.getElementById('brokerBadge');
+      badge.textContent = b + (d.logged_in ? ' ✓' : ' ✗');
+      badge.style.background = d.logged_in ? '#14532d' : '#7f1d1d';
+    }).catch(() => {});
+}
+
+/* ── CONTROL ── */
+function controlCollector(action){
+  document.getElementById('btnStart').disabled = true;
+  document.getElementById('btnStop').disabled  = true;
+
+  fetch('/admin/api/' + action, {method:'POST'})
+    .then(r => r.json())
+    .then(d => {
+      if(d.status === 'success'){
+        refreshStatus();
+        if(action === 'start'){
+          startFeedPoll();
+        } else {
+          stopFeedPoll();
+        }
+      } else {
+        alert('Error: ' + (d.message||'Unknown'));
+        refreshStatus();
+      }
+    })
+    .catch(e => { alert('Request failed: '+e.message); refreshStatus(); });
+}
+
+/* ── STATUS POLLING ── */
+function startPolling(){
+  refreshStatus();
+  _pollInterval = setInterval(refreshStatus, 2000);
+}
+
+function refreshStatus(){
+  fetch('/admin/api/status')
+    .then(r => r.json())
+    .then(d => updateUI(d))
+    .catch(() => {});
+}
+
+function updateUI(d){
+  var running  = d.running;
+  var dot      = document.getElementById('statusDot');
+  var text     = document.getElementById('statusText');
+  var sub      = document.getElementById('statusSub');
+  var btnStart = document.getElementById('btnStart');
+  var btnStop  = document.getElementById('btnStop');
+
+  if(running){
+    dot.className  = 'status-dot dot-running';
+    text.textContent = '● COLLECTING';
+    text.style.color = '#4ade80';
+    sub.textContent  = 'Saving tick data to database';
+    btnStart.disabled = true;
+    btnStop.disabled  = false;
+  } else {
+    dot.className  = 'status-dot dot-stopped';
+    text.textContent = '■ STOPPED';
+    text.style.color = '#f87171';
+    var autoOn = _schedConfig && _schedConfig.auto_schedule;
+    sub.textContent  = autoOn ? 'Auto schedule active — will start at market open' : 'Data collection is not running';
+    btnStart.disabled = false;
+    btnStop.disabled  = true;
+  }
+
+  /* Stats */
+  var stor = d.storage || {};
+  var coll = d.collector || {};
+  document.getElementById('cardTps').textContent     = stor.ticks_per_sec || 0;
+  document.getElementById('cardTotal').textContent   = fmtNum(stor.total_ticks || 0);
+  document.getElementById('cardSymbols').textContent = coll.symbols_live || 0;
+  document.getElementById('cardDb').textContent      = fmtKb(stor.db_size_kb || 0);
+  document.getElementById('cardUptime').textContent  = fmtUptime(coll.uptime_sec || 0);
+}
+
+/* ── SCHEDULE ── */
+function loadSchedule(){
+  fetch('/admin/api/schedule')
+    .then(r => r.json())
+    .then(d => {
+      _schedConfig = d;
+      document.getElementById('autoToggle').checked = !!d.auto_schedule;
+      renderScheduleTable(d.schedules || []);
+    }).catch(() => {});
+}
+
+function renderScheduleTable(schedules){
+  var tbody = document.getElementById('schedBody');
+  tbody.innerHTML = '';
+  schedules.forEach(function(s, idx){
+    var activeDays = s.days || [];
+    var dayBtns = DAYS.map(function(day){
+      var active = activeDays.includes(day) ? 'active' : '';
+      return '<button class="day-btn '+active+'" onclick="toggleDay('+idx+',\''+day+'\',this)">'+day+'</button>';
+    }).join('');
+
+    tbody.innerHTML += '<tr>' +
+      '<td><strong style="color:#38bdf8">'+s.name+'</strong></td>' +
+      '<td><input type="time" value="'+s.start+'" id="start_'+idx+'"/></td>' +
+      '<td><input type="time" value="'+s.stop+'"  id="stop_'+idx+'"/></td>' +
+      '<td>'+dayBtns+'</td>' +
+    '</tr>';
+  });
+}
+
+function toggleDay(idx, day, btn){
+  if(!_schedConfig) return;
+  var sched = _schedConfig.schedules[idx];
+  if(sched.days.includes(day)){
+    sched.days = sched.days.filter(d => d !== day);
+    btn.classList.remove('active');
+  } else {
+    sched.days.push(day);
+    btn.classList.add('active');
+  }
+}
+
+function toggleAuto(checked){
+  if(_schedConfig) _schedConfig.auto_schedule = checked;
+}
+
+function saveSchedule(){
+  if(!_schedConfig) return;
+  // Read updated times from inputs
+  (_schedConfig.schedules || []).forEach(function(s, idx){
+    var startEl = document.getElementById('start_'+idx);
+    var stopEl  = document.getElementById('stop_'+idx);
+    if(startEl) s.start = startEl.value;
+    if(stopEl)  s.stop  = stopEl.value;
+  });
+
+  fetch('/admin/api/schedule', {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify(_schedConfig)
+  })
+  .then(r => r.json())
+  .then(d => {
+    if(d.status === 'success'){
+      showToast('Schedule saved ✓');
+    } else {
+      alert('Error: '+(d.message||''));
+    }
+  }).catch(e => alert('Failed: '+e.message));
+}
+
+/* ── LIVE FEED ── */
+function startFeedPoll(){
+  if(_feedPoll) return;
+  _feedPoll = setInterval(fetchFeedTick, 500);
+}
+function stopFeedPoll(){
+  if(_feedPoll){ clearInterval(_feedPoll); _feedPoll = null; }
+}
+function clearFeed(){
+  document.getElementById('feedBox').innerHTML = '';
+}
+
+var _lastFeedTs = 0;
+function fetchFeedTick(){
+  fetch('/admin/api/latest-ticks')
+    .then(r => r.json())
+    .then(d => {
+      var box = document.getElementById('feedBox');
+      var ticks = d.ticks || [];
+      if(!ticks.length) return;
+      // Show only ticks newer than last seen
+      var newTicks = ticks.filter(t => t.ts > _lastFeedTs);
+      if(!newTicks.length) return;
+      _lastFeedTs = Math.max(...newTicks.map(t => t.ts));
+      // Remove placeholder
+      var placeholder = box.querySelector('[data-placeholder]');
+      if(placeholder) placeholder.remove();
+      newTicks.slice(-10).forEach(function(t){
+        var row = document.createElement('div');
+        row.className = 'feed-row new';
+        var dt = new Date(t.ts * 1000);
+        var tm = dt.toTimeString().split(' ')[0];
+        row.textContent = tm + '  ' + padR(t.symbol,15) + '  LTP: ' + t.ltp +
+          (t.volume ? '  Vol: '+fmtNum(t.volume) : '') +
+          (t.oi     ? '  OI: '+fmtNum(t.oi)      : '');
+        box.insertBefore(row, box.firstChild);
+      });
+      // Keep max 100 rows
+      while(box.children.length > 100) box.removeChild(box.lastChild);
+    }).catch(() => {});
+}
+
+/* ── HELPERS ── */
+function fmtNum(n){ return Number(n).toLocaleString('en-IN'); }
+function fmtKb(kb){
+  if(kb < 1024) return kb + ' KB';
+  return (kb/1024).toFixed(1) + ' MB';
+}
+function fmtUptime(s){
+  if(s < 60)   return s + 's';
+  if(s < 3600) return Math.floor(s/60) + 'm ' + (s%60) + 's';
+  return Math.floor(s/3600) + 'h ' + Math.floor((s%3600)/60) + 'm';
+}
+function padR(str, len){ return (str + ' '.repeat(len)).slice(0, len); }
+function showToast(msg){
+  var t = document.createElement('div');
+  t.textContent = msg;
+  t.style.cssText = 'position:fixed;bottom:24px;right:24px;background:#16a34a;color:#fff;' +
+    'padding:10px 20px;border-radius:8px;font-weight:700;z-index:9999;font-size:14px;';
+  document.body.appendChild(t);
+  setTimeout(() => t.remove(), 2500);
+}
+</script>
+</body>
+</html>

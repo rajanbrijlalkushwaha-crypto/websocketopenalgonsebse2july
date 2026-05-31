@@ -1,0 +1,98 @@
+version: "3.9"
+
+services:
+  # ── Kafka (KRaft mode — no ZooKeeper) ──────────────────────────────
+  kafka:
+    image: bitnami/kafka:3.7
+    container_name: kafka
+    restart: unless-stopped
+    ports:
+      - "9092:9092"
+      - "9093:9093"
+    environment:
+      KAFKA_CFG_NODE_ID: 1
+      KAFKA_CFG_PROCESS_ROLES: broker,controller
+      KAFKA_CFG_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_CFG_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+      KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CFG_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_CFG_NUM_PARTITIONS: 4
+      KAFKA_CFG_DEFAULT_REPLICATION_FACTOR: 1
+      KAFKA_CFG_LOG_RETENTION_HOURS: 168        # 7 days of ticks
+      KAFKA_CFG_LOG_RETENTION_BYTES: 10737418240 # 10 GB cap per partition
+      KAFKA_CFG_MESSAGE_MAX_BYTES: 1048576
+      ALLOW_PLAINTEXT_LISTENER: "yes"
+    volumes:
+      - kafka_data:/bitnami/kafka
+    healthcheck:
+      test: ["CMD", "kafka-topics.sh", "--bootstrap-server", "localhost:9092", "--list"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+
+  # ── Dragonfly (Redis-compatible, 25x faster pub/sub) ────────────────
+  dragonfly:
+    image: docker.dragonflydb.io/dragonflydb/dragonfly:latest
+    container_name: dragonfly
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    command: >
+      --maxmemory=2gb
+      --save_schedule="0 */1 * * *"
+      --dbfilename=dragonfly.rdb
+    volumes:
+      - dragonfly_data:/data
+    ulimits:
+      memlock: -1
+    healthcheck:
+      test: ["CMD", "redis-cli", "-p", "6379", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── InfluxDB (time-series for OHLCV bars + charts) ──────────────────
+  influxdb:
+    image: influxdb:2.7
+    container_name: influxdb
+    restart: unless-stopped
+    ports:
+      - "8086:8086"
+    environment:
+      DOCKER_INFLUXDB_INIT_MODE: setup
+      DOCKER_INFLUXDB_INIT_USERNAME: admin
+      DOCKER_INFLUXDB_INIT_PASSWORD: openalgo2024
+      DOCKER_INFLUXDB_INIT_ORG: openalgo
+      DOCKER_INFLUXDB_INIT_BUCKET: ticks
+      DOCKER_INFLUXDB_INIT_RETENTION: 30d
+      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: openalgo-influx-token-2024
+    volumes:
+      - influxdb_data:/var/lib/influxdb2
+    healthcheck:
+      test: ["CMD", "influx", "ping"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+
+  # ── Kafka UI (dev/admin only — remove in prod) ───────────────────────
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka-ui
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+    depends_on:
+      kafka:
+        condition: service_healthy
+    profiles:
+      - dev   # only starts with: docker compose --profile dev up
+
+volumes:
+  kafka_data:
+  dragonfly_data:
+  influxdb_data:

@@ -1,0 +1,41 @@
+{
+  "auto_schedule": true,
+  "timezone": "Asia/Kolkata",
+  "schedules": [
+    {
+      "name": "NSE / BSE",
+      "exchanges": [
+        "NSE",
+        "BSE",
+        "NFO",
+        "BFO",
+        "NSE_INDEX",
+        "BSE_INDEX"
+      ],
+      "start": "09:15",
+      "stop": "15:35",
+      "days": [
+        "Mon",
+        "Tue",
+        "Wed",
+        "Thu",
+        "Fri"
+      ]
+    },
+    {
+      "name": "MCX",
+      "exchanges": [
+        "MCX"
+      ],
+      "start": "09:00",
+      "stop": "23:30",
+      "days": [
+        "Mon",
+        "Tue",
+        "Wed",
+        "Thu",
+        "Fri"
+      ]
+    }
+  ]
+}

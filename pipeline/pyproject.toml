@@ -1,0 +1,33 @@
+[project]
+name = "pipeline"
+version = "0.1.0"
+description = "OpenAlgo tick pipeline: Kafka → Dragonfly → Socket.io + InfluxDB"
+requires-python = ">=3.12"
+dependencies = [
+    # Kafka
+    "confluent-kafka>=2.4.0",
+    # Redis / Dragonfly
+    "redis>=5.0.0",
+    # InfluxDB
+    "influxdb-client>=1.44.0",
+    # Socket.io
+    "python-socketio>=5.11.0",
+    "flask>=3.0.0",
+    "flask-cors>=4.0.0",
+    "eventlet>=0.36.0",
+    # WebSocket (for producer → OpenAlgo WS)
+    "websocket-client>=1.8.0",
+    # Scheduler
+    "apscheduler>=3.11.0",
+    # Utils
+    "python-dotenv>=1.0.0",
+    "pytz>=2024.1",
+]
+
+[tool.setuptools]
+packages = ["pipeline", "pipeline.producer", "pipeline.consumers",
+            "pipeline.socketio_server", "pipeline.scheduler", "pipeline.config"]
+
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
