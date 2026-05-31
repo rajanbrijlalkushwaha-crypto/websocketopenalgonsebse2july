@@ -909,4 +909,4 @@ register_auth_routes(app, scheduler_ref=_scheduler)
 
 
 if __name__ == '__main__':
-    app.run(debug=False, port=5800)
+    app.run(host='0.0.0.0', debug=False, port=5800)
