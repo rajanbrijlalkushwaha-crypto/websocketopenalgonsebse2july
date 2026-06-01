@@ -1,4 +1,5 @@
 import { useEffect, useCallback, useRef, lazy, Suspense } from 'react';
+import { io } from 'socket.io-client';
 import { AppProvider, useApp } from './context/AppContext';
 import { fetchSymbols, fetchLiveData, fetchLiveSignals, fetchShiftingData, fetchMCTRData, fetchStrategy40Data, fetchPrefetch } from './services/api';
 import IndexPage from './components/Index/IndexPage';
@@ -188,45 +189,58 @@ function AppContent() {
     } catch (_) {}
   }, [state.user, state.symbols, dispatch]);
 
-  // ── SSE live stream — tick-by-tick via EventSource ───────────────────────
-  const sseRef = useRef(null);
+  // ── Socket.io live stream — tick-by-tick via Dragonfly pub/sub ──────────
+  const socketRef = useRef(null);
+  const SOCKETIO_URL = `${window.location.protocol}//${window.location.hostname}:5900`;
 
   useEffect(() => {
     if (!state.currentSymbol || state.historicalMode) return;
 
-    // Close previous SSE connection
-    if (sseRef.current) { sseRef.current.close(); sseRef.current = null; }
+    // Connect socket.io once, reuse across symbol changes
+    if (!socketRef.current) {
+      const socket = io(SOCKETIO_URL, {
+        transports: ['websocket'],
+        reconnection: true,
+        reconnectionDelay: 1000,
+      });
+      socketRef.current = socket;
 
-    // Load initial snapshot immediately via REST
-    fetchLiveData(state.currentSymbol)
-      .then(data => dispatch({ type: 'SET_LIVE_DATA', payload: data }))
-      .catch(() => {});
+      socket.on('chain', (data) => {
+        if (data && data.success !== false) {
+          dispatch({ type: 'SET_LIVE_DATA', payload: data });
+        }
+      });
 
-    // Open SSE stream for tick-by-tick updates
-    const url = `${API_BASE}/trading/api/option-chain/stream/${state.currentSymbol}`;
-    const es = new EventSource(url);
-    sseRef.current = es;
-
-    es.onmessage = (e) => {
-      try {
-        const data = JSON.parse(e.data);
-        if (data && !data.error) dispatch({ type: 'SET_LIVE_DATA', payload: data });
-      } catch (_) {}
-    };
-
-    es.onerror = () => {
-      // SSE disconnected — fall back to REST polling at 2s
-      es.close();
-      sseRef.current = null;
-      const fallback = setInterval(() => {
+      socket.on('disconnect', () => {
+        // On disconnect, fall back to REST to keep data visible
         fetchLiveData(state.currentSymbol)
           .then(data => dispatch({ type: 'SET_LIVE_DATA', payload: data }))
           .catch(() => {});
-      }, 2000);
-      return () => clearInterval(fallback);
-    };
+      });
+    }
 
-    return () => { es.close(); sseRef.current = null; };
+    const socket = socketRef.current;
+
+    // Load initial snapshot — first from Dragonfly REST (instant), then live
+    fetch(`${SOCKETIO_URL}/api/chain/${state.currentSymbol}`)
+      .then(r => r.json())
+      .then(data => { if (data && !data.error) dispatch({ type: 'SET_LIVE_DATA', payload: data }); })
+      .catch(() => {
+        // Dragonfly has no data yet — fall back to SSE
+        fetchLiveData(state.currentSymbol)
+          .then(data => dispatch({ type: 'SET_LIVE_DATA', payload: data }))
+          .catch(() => {});
+      });
+
+    // Subscribe to this underlying's chain updates
+    socket.emit('subscribe_chain', { underlying: state.currentSymbol });
+
+    return () => {
+      // Unsubscribe when symbol changes
+      if (socketRef.current) {
+        socketRef.current.emit('unsubscribe_chain', { underlying: state.currentSymbol });
+      }
+    };
   }, [state.currentSymbol, state.historicalMode, dispatch]);
 
   // Historical shifting data — only in historical mode (reads from disk, no polling needed)

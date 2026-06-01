@@ -50,8 +50,8 @@ log = logging.getLogger(__name__)
 
 _running = False
 
-TICK_TTL  = 60    # seconds — deleted if no new tick for 60s
-CHAIN_TTL = 30    # seconds — deleted if no new snapshot for 30s
+TICK_TTL  = 86400   # 24h — last tick survives after market close
+CHAIN_TTL = 86400   # 24h — last chain survives after market close
 
 
 def _connect_dragonfly() -> redis.Redis:

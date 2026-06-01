@@ -48,6 +48,7 @@ from pipeline.config.settings import (
     SOCKETIO_PORT,
 )
 from pipeline.config.symbols import ALL_SYMBOLS, LOT_SIZES
+from datetime import datetime
 
 logging.basicConfig(
     level=logging.INFO,
@@ -75,6 +76,57 @@ _pubsub = _rd.pubsub()
 # ── InfluxDB ─────────────────────────────────────────────────────────
 _influx     = InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG)
 _query_api  = _influx.query_api()
+
+
+# ── Chain format transformer ──────────────────────────────────────────
+def _transform_chain(raw: dict) -> dict:
+    """Convert raw chain_snapshot → frontend SET_LIVE_DATA format."""
+    options    = raw.get('options', [])
+    underlying = raw.get('underlying', '')
+    expiry     = raw.get('expiry', '')
+    spot_ltp   = float(raw.get('spot_ltp') or 0)
+    spot_pc    = float(raw.get('spot_pc')  or 0)
+    atm        = int(raw.get('atm') or 0)
+    chg        = round(spot_ltp - spot_pc, 2) if spot_pc else 0
+    pct        = round(chg / spot_pc * 100, 2) if spot_pc else 0
+
+    def _row(d):
+        ltp = float(d.get('ltp') or 0)
+        pc  = float(d.get('prev_close') or 0)
+        oi  = int(d.get('oi') or 0)
+        ooi = int(d.get('open_oi') or 0)
+        return {
+            'ltp': ltp, 'prev_close': pc,
+            'ltp_change': round(ltp - pc, 2) if pc else 0,
+            'oi': oi, 'oi_change': oi - ooi,
+            'volume': int(d.get('volume') or 0),
+            'iv': float(d.get('iv') or 0),
+            'delta': float(d.get('delta') or 0),
+            'theta': float(d.get('theta') or 0),
+            'gamma': float(d.get('gamma') or 0),
+            'vega': float(d.get('vega') or 0),
+            'bid': float(d.get('bid') or 0),
+            'ask': float(d.get('ask') or 0),
+        }
+
+    chain = [
+        {'strike': o.get('strike', 0),
+         'call': _row(o.get('ce_data') or {}),
+         'put':  _row(o.get('pe_data') or {})}
+        for o in sorted(options, key=lambda x: x.get('strike', 0))
+    ]
+    now = datetime.now(IST)
+    return {
+        'success': True, 'symbol': underlying,
+        'spot_price': spot_ltp, 'spot_prev_close': spot_pc,
+        'spot_change': chg, 'spot_pct_change': pct,
+        'expiry': expiry, 'chain': chain,
+        'chains': {expiry: chain}, 'availableExpiries': [expiry],
+        'lot_size': LOT_SIZES.get(underlying, 1),
+        'atm': atm,
+        'date': now.strftime('%Y-%m-%d'),
+        'time': now.strftime('%H:%M:%S'),
+    }
 
 
 # ── Socket.io events ─────────────────────────────────────────────────
@@ -105,10 +157,10 @@ def on_subscribe_chain(sid, data):
         sio.enter_room(sid, f'chain:{u}')
         # Send latest chain immediately (find any expiry key)
         keys = _rd.keys(f"{DRAGONFLY_CHAIN_PREFIX}{u}:*")
-        for k in keys[:1]:   # send first available expiry
+        for k in keys[:1]:
             val = _rd.get(k)
             if val:
-                sio.emit('chain', json.loads(val), room=sid)
+                sio.emit('chain', _transform_chain(json.loads(val)), room=sid)
 
 @sio.on('unsubscribe_tick')
 def on_unsubscribe_tick(sid, data):
@@ -150,8 +202,7 @@ def _dragonfly_listener():
             elif channel == DRAGONFLY_CH_CHAIN:
                 underlying = payload.get('underlying')
                 if underlying:
-                    # Emit full chain to all clients watching this underlying
-                    sio.emit('chain', payload, room=f'chain:{underlying}')
+                    sio.emit('chain', _transform_chain(payload), room=f'chain:{underlying}')
 
         except Exception as e:
             log.error("Listener error on %s: %s", channel, e)
@@ -221,7 +272,7 @@ def api_chain(underlying):
         val  = _rd.get(keys[0]) if keys else None
 
     if val:
-        return jsonify(json.loads(val))
+        return jsonify(_transform_chain(json.loads(val)))
     return jsonify({'error': 'No chain data', 'underlying': underlying}), 404
 
 
