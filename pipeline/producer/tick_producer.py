@@ -125,7 +125,8 @@ class TickProducer:
         self._sent        = 0
         self._errors      = 0
         self._lock        = threading.Lock()
-        self._opt_symbols = []   # (symbol, exchange) for option strikes
+        self._opt_symbols = []
+        self._subscribed  = False   # prevent duplicate subscribe on each ack
 
     def _subscribe_all(self, ws):
         """Subscribe underlyings + all active option strikes."""
@@ -149,6 +150,7 @@ class TickProducer:
                  count, len(ALL_SYMBOLS), len(self._opt_symbols))
 
     def _on_open(self, ws):
+        self._subscribed = False
         log.info("WebSocket connected — authenticating")
         ws.send(json.dumps({'action': 'authenticate', 'api_key': OPENALGO_API_KEY}))
 
@@ -157,9 +159,11 @@ class TickProducer:
             raw      = json.loads(message)
             msg_type = raw.get('type', '')
 
-            if msg_type == 'auth_success' or raw.get('status') == 'success':
-                log.info("Authenticated — subscribing all symbols")
-                self._subscribe_all(ws)
+            if msg_type == 'auth_success' or (raw.get('status') == 'success' and not self._subscribed):
+                if not self._subscribed:
+                    self._subscribed = True
+                    log.info("Authenticated — subscribing all symbols")
+                    self._subscribe_all(ws)
                 return
 
             if msg_type not in ('depth', 'quote', 'ltp', 'tick'):
@@ -191,6 +195,7 @@ class TickProducer:
         log.error("WebSocket error: %s", error)
 
     def _on_close(self, ws, code, msg):
+        self._subscribed = False
         log.warning("WebSocket closed (%s) — will reconnect", code)
 
     def run(self):
