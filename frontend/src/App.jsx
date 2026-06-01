@@ -206,7 +206,7 @@ function AppContent() {
       socketRef.current = socket;
 
       socket.on('chain', (data) => {
-        if (data && data.success !== false) {
+        if (data && data.chain && data.chain.length > 0) {
           dispatch({ type: 'SET_LIVE_DATA', payload: data });
         }
       });
@@ -224,7 +224,7 @@ function AppContent() {
     // Load initial snapshot — first from Dragonfly REST (instant), then live
     fetch(`/socketio/api/chain/${state.currentSymbol}`)
       .then(r => r.json())
-      .then(data => { if (data && !data.error) dispatch({ type: 'SET_LIVE_DATA', payload: data }); })
+      .then(data => { if (data && data.chain && data.chain.length > 0) dispatch({ type: 'SET_LIVE_DATA', payload: data }); })
       .catch(() => {
         // Dragonfly has no data yet — fall back to SSE
         fetchLiveData(state.currentSymbol)
