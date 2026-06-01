@@ -163,7 +163,7 @@ function appReducer(state, action) {
       return { ...state, availableSymbols: action.payload };
     case 'SET_CURRENT_SYMBOL':
       return { ...state, currentSymbol: action.payload, signalsLoading: true,
-        selectedExpiry: null, chains: {}, availableExpiries: [],
+        selectedExpiry: null, availableExpiries: [],
         mctrSupport: null, mctrResistance: null,
         shiftingResistance: null, shiftingSupport: null, shiftingTimeline: [],
         strategy40Support: null, strategy40Resistance: null,
