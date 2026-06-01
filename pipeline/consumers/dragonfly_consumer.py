@@ -136,9 +136,9 @@ def run_consumer():
 
                 elif topic == KAFKA_TOPIC_CHAIN:
                     # ── Full chain snapshot ──────────────────────────
-                    underlying = payload.get('underlying', '')
-                    expiry     = payload.get('expiry', '')
-                    if not underlying:
+                    underlying = payload.get('underlying', '') or ''
+                    expiry     = payload.get('expiry', '') or ''
+                    if not underlying or not expiry:
                         continue
 
                     chain_json = json.dumps(payload)
