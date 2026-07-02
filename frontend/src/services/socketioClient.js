@@ -9,10 +9,11 @@
 
 import { io } from 'socket.io-client';
 
-const SIO_URL =
-  process.env.REACT_APP_PIPELINE_URL ||
-  process.env.REACT_APP_API_URL?.replace('5800', '5900') ||
-  'http://127.0.0.1:5900';
+// Always connect directly to tick server on port 5900.
+// In dev the webpack proxy also works but direct is simpler.
+const _host = window.location.hostname;
+const SIO_URL = process.env.REACT_APP_PIPELINE_URL
+  || `${window.location.protocol}//${_host}:5900`;
 
 class SIOClient {
   constructor() {
@@ -26,10 +27,11 @@ class SIOClient {
     if (this.socket?.connected) return;
 
     this.socket = io(SIO_URL, {
-      transports: ['websocket', 'polling'],
+      transports: ['websocket'],   // websocket only — no polling overhead/delay
+      upgrade: false,
       reconnection: true,
-      reconnectionDelay: 1000,
-      reconnectionDelayMax: 15000,
+      reconnectionDelay: 500,
+      reconnectionDelayMax: 5000,
     });
 
     this.socket.on('connect', () => {

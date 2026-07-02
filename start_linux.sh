@@ -38,15 +38,11 @@ echo "      PID: $!  |  log: tail -f /tmp/option_chain.log"
 cd "$ROOT"
 sleep 2
 
-# ── 4. Pipeline: Socket.io server + Market scheduler ─────────
-echo "[4/5] Starting Pipeline (Socket.io :5900 + Scheduler)..."
-$UV run --project pipeline python -m pipeline.socketio_server.server \
-  > /tmp/socketio_server.log 2>&1 &
-echo "      Socket.io PID: $!  |  log: tail -f /tmp/socketio_server.log"
-
-$UV run --project pipeline python -m pipeline.scheduler.market_scheduler \
-  > /tmp/market_scheduler.log 2>&1 &
-echo "      Scheduler PID: $!  |  log: tail -f /tmp/market_scheduler.log"
+# ── 4. Tick Socket.io server (tick-by-tick, no Kafka/Dragonfly needed) ──
+echo "[4/5] Starting Tick Socket.io server (port 5900)..."
+$UV run --project pipeline python "$ROOT/ticks/server.py" \
+  > /tmp/ticks_server.log 2>&1 &
+echo "      PID: $!  |  log: tail -f /tmp/ticks_server.log"
 sleep 2
 
 # ── 5. React frontend ─────────────────────────────────────────

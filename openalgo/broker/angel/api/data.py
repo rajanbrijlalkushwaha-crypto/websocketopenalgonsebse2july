@@ -109,6 +109,8 @@ class BrokerData:
                 "/rest/secure/angelbroking/market/v1/quote/", self.auth_token, "POST", payload
             )
 
+            logger.debug(f"Angel quote response for {symbol}/{exchange}: status={response.get('status')}, fetched={len(response.get('data',{}).get('fetched',[]))}, unfetched={response.get('data',{}).get('unfetched',[])} tok={self.auth_token[:20] if self.auth_token else 'None'}")
+
             if not response.get("status"):
                 raise Exception(f"Error from Angel API: {response.get('message', 'Unknown error')}")
 

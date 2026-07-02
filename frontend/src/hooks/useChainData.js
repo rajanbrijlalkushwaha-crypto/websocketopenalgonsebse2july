@@ -26,7 +26,7 @@ export function useChainData(underlying) {
     sioClient.socket?.emit('subscribe_chain', { underlying });
 
     const handler = (data) => {
-      if (data?.underlying === underlying) setChain(data);
+      if (data?.symbol === underlying) setChain(data);
     };
     sioClient.socket?.on('chain', handler);
 

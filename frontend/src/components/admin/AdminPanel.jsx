@@ -1918,8 +1918,358 @@ function TokenTab({ adminToken }) {
   );
 }
 
+// ── Connection Tab ───────────────────────────────────────────────────────────
+function ConnectionTab({ adminToken }) {
+  const [brokerStatus,   setBrokerStatus]   = useState(null);
+  const [angelStatus,    setAngelStatus]    = useState(null);
+  const [angelLoading,   setAngelLoading]   = useState(false);
+  const [angelMsg,       setAngelMsg]       = useState('');
+  const [tickHealth,     setTickHealth]     = useState(null);
+  const [collStatus,     setCollStatus]     = useState(null);
+  const [actionLoading,  setActionLoading]  = useState(false);
+  const [msg,            setMsg]            = useState('');
+  const [schedDays,      setSchedDays]      = useState([1,2,3,4,5]);
+  const [schedStart,     setSchedStart]     = useState('09:15');
+  const [schedStop,      setSchedStop]      = useState('15:35');
+  const [schedEnabled,   setSchedEnabled]   = useState(true);
+  const [schedMsg,       setSchedMsg]       = useState('');
+
+  const fetchBrokerStatus = useCallback(async () => {
+    try {
+      const d = await fetch('/api/broker-status').then(r => r.json());
+      setBrokerStatus(d);
+    } catch {}
+  }, []);
+
+  const fetchAngelStatus = useCallback(async () => {
+    if (!adminToken) return;
+    try {
+      const d = await ADMIN_API('/api/admin/angel-status', adminToken);
+      setAngelStatus(d);
+    } catch {}
+  }, [adminToken]);
+
+  const fetchTickHealth = useCallback(async () => {
+    try {
+      const d = await fetch('/tick-health').then(r => r.json());
+      setTickHealth(d);
+    } catch { setTickHealth(null); }
+  }, []);
+
+  const fetchCollStatus = useCallback(async () => {
+    try {
+      const d = await fetch('/admin/api/status').then(r => r.json());
+      setCollStatus(d);
+    } catch {}
+  }, []);
+
+  const fetchSchedule = useCallback(async () => {
+    try {
+      const d = await fetch('/admin/api/schedule').then(r => r.json());
+      if (!d || d.error) return;
+      // New format: { schedules: [{days,start,stop,...}], auto_schedule }
+      // Old format: { days, start_time, stop_time, enabled }
+      if (d.schedules?.length) {
+        const nse = d.schedules.find(s => s.name?.includes('NSE')) || d.schedules[0];
+        const DAY_MAP = { Mon:1, Tue:2, Wed:3, Thu:4, Fri:5, Sat:6, Sun:7 };
+        setSchedDays((nse.days || []).map(x => DAY_MAP[x] ?? x).filter(Boolean));
+        setSchedStart(nse.start || '09:15');
+        setSchedStop(nse.stop  || '15:35');
+        setSchedEnabled(d.auto_schedule !== false);
+      } else {
+        setSchedDays(d.days || [1,2,3,4,5]);
+        setSchedStart(d.start_time || '09:15');
+        setSchedStop(d.stop_time  || '15:35');
+        setSchedEnabled(d.enabled !== false);
+      }
+    } catch {}
+  }, []);
+
+  useEffect(() => {
+    fetchBrokerStatus();
+    fetchAngelStatus();
+    fetchCollStatus();
+    fetchTickHealth();
+    fetchSchedule();
+    const id = setInterval(() => {
+      fetchBrokerStatus();
+      fetchAngelStatus();
+      fetchCollStatus();
+      fetchTickHealth();
+    }, 8000);
+    return () => clearInterval(id);
+  }, [fetchBrokerStatus, fetchAngelStatus, fetchCollStatus, fetchTickHealth, fetchSchedule]);
+
+  const triggerAngelLogin = async () => {
+    setAngelLoading(true); setAngelMsg('Triggering TOTP login…');
+    try {
+      const d = await ADMIN_API('/api/admin/trigger-angel-login', adminToken, { method: 'POST' });
+      setAngelMsg(d.success ? `✅ ${d.message}` : `❌ ${d.message}`);
+      if (d.success) setTimeout(fetchAngelStatus, 3000);
+    } catch { setAngelMsg('❌ Request failed'); }
+    setAngelLoading(false);
+    setTimeout(() => setAngelMsg(''), 6000);
+  };
+
+  const startFetching = async () => {
+    setActionLoading(true); setMsg('');
+    try {
+      const d = await fetch('/admin/api/start', { method: 'POST' }).then(r => r.json());
+      setMsg(d.message || (d.status === 'success' ? 'Started!' : 'Failed'));
+      await fetchCollStatus();
+    } catch { setMsg('Error'); }
+    setActionLoading(false);
+    setTimeout(() => setMsg(''), 3000);
+  };
+
+  const stopFetching = async () => {
+    setActionLoading(true); setMsg('');
+    try {
+      const d = await fetch('/admin/api/stop', { method: 'POST' }).then(r => r.json());
+      setMsg(d.message || (d.status === 'success' ? 'Stopped!' : 'Failed'));
+      await fetchCollStatus();
+    } catch { setMsg('Error'); }
+    setActionLoading(false);
+    setTimeout(() => setMsg(''), 3000);
+  };
+
+  const saveSchedule = async () => {
+    setSchedMsg('');
+    try {
+      const d = await fetch('/admin/api/schedule', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ days: schedDays, start_time: schedStart, stop_time: schedStop, enabled: schedEnabled, auto_schedule: schedEnabled }),
+      }).then(r => r.json());
+      setSchedMsg(d.status === 'success' ? '✅ Schedule saved!' : '❌ Failed to save');
+    } catch { setSchedMsg('❌ Error saving'); }
+    setTimeout(() => setSchedMsg(''), 3000);
+  };
+
+  const toggleDay = (d) => setSchedDays(prev =>
+    prev.includes(d) ? prev.filter(x => x !== d) : [...prev, d].sort()
+  );
+
+  const running     = !!collStatus?.running;
+  const totalTicks  = collStatus?.collector?.total_ticks ?? collStatus?.storage?.total_ticks;
+  const lastTickTs  = collStatus?.collector?.last_tick;
+  const marketOpen  = collStatus?.market_open;
+
+  const tokenActive = angelStatus?.token_valid;
+  const brokerName  = (angelStatus?.broker || brokerStatus?.broker || 'angel').toUpperCase();
+
+  return (
+    <div className="admp-tab">
+      <div className="admp-tab-header">
+        <span className="admp-tab-title">Connection & Data Feed</span>
+        <button className="admp-btn admp-btn-outline" onClick={() => {
+          fetchBrokerStatus(); fetchAngelStatus(); fetchCollStatus(); fetchSchedule();
+        }}>
+          ↻ Refresh
+        </button>
+      </div>
+
+      {/* ── Angel One TOTP Token Status ── */}
+      <div style={{ marginBottom: 22 }}>
+        <div style={{ fontWeight: 700, fontSize: 12, color: '#666', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 10 }}>
+          Broker TOTP Token — {brokerName}
+        </div>
+
+        {!adminToken ? (
+          <div style={{ fontSize: 12, color: '#aaa', padding: '10px 0' }}>
+            Login with admin credentials to see token status.
+          </div>
+        ) : (
+          <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'flex-start' }}>
+            {/* Token status card */}
+            <div style={{
+              background: tokenActive ? '#e8f5e9' : angelStatus ? '#fff3f3' : '#f5f5f5',
+              border: `2px solid ${tokenActive ? '#66bb6a' : angelStatus ? '#ef9a9a' : '#e0e0e0'}`,
+              borderRadius: 12, padding: '16px 20px', minWidth: 200,
+            }}>
+              <div style={{ fontSize: 11, color: '#888', marginBottom: 6 }}>
+                {brokerName} Access Token
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+                <span className={`admp-dot ${tokenActive ? 'green' : angelStatus ? 'red' : 'grey'}`} style={{ width: 12, height: 12 }} />
+                <span style={{ fontWeight: 800, fontSize: 15, color: tokenActive ? '#1b5e20' : angelStatus ? '#b71c1c' : '#999' }}>
+                  {!angelStatus ? 'Checking…' : tokenActive ? 'Token Active' : 'No Token'}
+                </span>
+              </div>
+              <div style={{ fontSize: 11, color: tokenActive ? '#388e3c' : '#e57373', lineHeight: 1.5 }}>
+                {!angelStatus ? '' : tokenActive
+                  ? '✓ TOTP auto-login succeeded\n✓ Ready to fetch data'
+                  : '✗ TOTP login not yet run\n✗ Token missing or expired'}
+              </div>
+              {angelStatus?.message && !tokenActive && (
+                <div style={{ fontSize: 10, color: '#999', marginTop: 6, wordBreak: 'break-word' }}>
+                  {angelStatus.message}
+                </div>
+              )}
+            </div>
+
+            {/* Trigger button */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8, justifyContent: 'center' }}>
+              <button
+                className="admp-btn admp-btn-primary"
+                onClick={triggerAngelLogin}
+                disabled={angelLoading}
+                style={{ whiteSpace: 'nowrap' }}
+              >
+                {angelLoading ? '⟳ Logging in…' : '⚡ Trigger TOTP Login Now'}
+              </button>
+              <div style={{ fontSize: 11, color: '#888', maxWidth: 200 }}>
+                Auto-runs daily at 08:30 IST (Mon–Fri).<br/>
+                Click above to run immediately.
+              </div>
+              {angelMsg && (
+                <div className="admp-msg" style={{ margin: 0, fontSize: 12 }}>{angelMsg}</div>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* ── Status Cards ── */}
+      <div className="admp-sys-grid" style={{ marginBottom: 22 }}>
+        {/* Tick Server Card */}
+        <div className="admp-sys-card">
+          <div className="admp-sys-label">Live Tick Feed (WebSocket → Socket.io)</div>
+          <div className="admp-sys-val">
+            <span className={`admp-dot ${tickHealth?.status === 'ok' ? 'green' : 'red'}`} />
+            {tickHealth ? (tickHealth.status === 'ok' ? 'Running' : 'Down') : 'Checking…'}
+          </div>
+          <div className="admp-sys-meta">
+            {tickHealth?.stats && <>
+              <span>Ticks received: <b>{(tickHealth.stats.received || 0).toLocaleString()}</b></span>
+              <span>Emitted to browser: <b>{(tickHealth.stats.emitted || 0).toLocaleString()}</b></span>
+              <span>Saved to DB: <b>{(tickHealth.stats.saved || 0).toLocaleString()}</b></span>
+              <span>Connected clients: <b>{tickHealth.stats.connected_clients || 0}</b></span>
+            </>}
+            {tickHealth?.storage && (
+              <span>Storage: <b style={{ color: tickHealth.storage === 'TimescaleDB' ? '#1565c0' : '#e65100' }}>
+                {tickHealth.storage}
+              </b>{tickHealth.storage === 'SQLite' ? ' (Mac/test)' : ' (Linux/prod)'}
+              </span>
+            )}
+            {tickHealth?.flush_interval_seconds && (
+              <span>DB flush: <b>every {tickHealth.flush_interval_seconds}s</b></span>
+            )}
+          </div>
+        </div>
+
+        {/* Broker Connection Card */}
+        <div className="admp-sys-card">
+          <div className="admp-sys-label">Broker Connection</div>
+          <div className="admp-sys-val">
+            <span className={`admp-dot ${brokerStatus?.logged_in ? 'green' : brokerStatus ? 'red' : 'grey'}`} />
+            {!brokerStatus ? 'Checking…'
+              : brokerStatus.logged_in ? 'Connected'
+              : 'Not Connected'}
+          </div>
+          <div className="admp-sys-meta">
+            {brokerStatus?.broker && (
+              <span>Broker: <b style={{ textTransform: 'capitalize' }}>{brokerStatus.broker}</b></span>
+            )}
+            {brokerStatus?.openalgo_url && (
+              <span style={{ fontSize: 11, color: '#888', wordBreak: 'break-all' }}>
+                {brokerStatus.openalgo_url}
+              </span>
+            )}
+            {brokerStatus?.status === 'error' && (
+              <span style={{ color: '#c62828', fontSize: 11 }}>{brokerStatus.message}</span>
+            )}
+          </div>
+          <div className="admp-sys-btns" style={{ marginTop: 10, flexWrap: 'wrap', gap: 6 }}>
+            {brokerStatus?.openalgo_url && (
+              <a
+                href={brokerStatus.openalgo_url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="admp-btn admp-btn-primary"
+                style={{ textDecoration: 'none', fontSize: 12 }}
+              >
+                🖥️ Open OpenAlgo
+              </a>
+            )}
+            {brokerStatus?.login_url && !brokerStatus.logged_in && (
+              <a
+                href={brokerStatus.login_url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="admp-btn admp-btn-success"
+                style={{ textDecoration: 'none', fontSize: 12 }}
+              >
+                🔑 Broker Login
+              </a>
+            )}
+            {!brokerStatus?.openalgo_url && (
+              <a
+                href="http://127.0.0.1:5000"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="admp-btn admp-btn-primary"
+                style={{ textDecoration: 'none', fontSize: 12 }}
+              >
+                🖥️ Open OpenAlgo
+              </a>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* ── Auto Schedule ── */}
+      <div style={{ background: '#f9f9f9', border: '1px solid #e0e0e0', borderRadius: 10, padding: '16px 18px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 }}>
+          <div style={{ fontWeight: 700, fontSize: 13, color: '#1a1a2e' }}>Auto Fetch Schedule</div>
+          <label className="admp-toggle-label">
+            <input type="checkbox" checked={schedEnabled} onChange={e => setSchedEnabled(e.target.checked)} />
+            <span className={`admp-pill ${schedEnabled ? 'green' : 'red'}`}>{schedEnabled ? 'Enabled' : 'Disabled'}</span>
+          </label>
+        </div>
+
+        <div className="admp-sched-section">
+          <div className="admp-sched-label">Active Days</div>
+          <div className="admp-days-row">
+            {DAYS.map((d, i) => (
+              <button
+                key={d}
+                className={`admp-day-btn ${schedDays.includes(i + 1) ? 'active' : ''}`}
+                onClick={() => toggleDay(i + 1)}
+              >
+                {d}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="admp-sched-section" style={{ marginTop: 12 }}>
+          <div className="admp-sched-label">Time Range (IST)</div>
+          <div className="admp-time-row">
+            <label>
+              Start Time
+              <input className="admp-input admp-input-time" type="time" value={schedStart} onChange={e => setSchedStart(e.target.value)} />
+            </label>
+            <label>
+              Stop Time
+              <input className="admp-input admp-input-time" type="time" value={schedStop} onChange={e => setSchedStop(e.target.value)} />
+            </label>
+          </div>
+        </div>
+
+        <div style={{ marginTop: 14, display: 'flex', alignItems: 'center', gap: 12 }}>
+          <button className="admp-btn admp-btn-primary" onClick={saveSchedule}>
+            💾 Save Schedule
+          </button>
+          {schedMsg && <span className="admp-msg" style={{ margin: 0 }}>{schedMsg}</span>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Main AdminPanel ──────────────────────────────────────────────────────────
-const TABS_ADMIN  = ['Users', 'Team', 'Notifications', 'Indicators', 'AI Train', 'Meet', 'Subscriptions', 'Coupons', 'Plans', 'Token', 'System', 'Schedule', 'Logs'];
+const TABS_ADMIN  = ['Users', 'Connection', 'Team', 'Notifications'];
 
 // ── Meet Tab ─────────────────────────────────────────────────────────────────
 function MeetTab() {
@@ -1974,7 +2324,7 @@ function MeetTab() {
     </div>
   );
 }
-const TABS_MEMBER = ['Users', 'AI Train'];
+const TABS_MEMBER = ['Users'];
 
 export default function AdminPanel() {
   useBodyScroll();
@@ -2059,6 +2409,7 @@ export default function AdminPanel() {
             onClick={() => setActiveTab(tab)}
           >
             {tab === 'Users' && '👥 '}
+            {tab === 'Connection' && '🔌 '}
             {tab === 'Team' && '🤝 '}
             {tab === 'Notifications' && '🔔 '}
             {tab === 'Indicators' && '🎛️ '}
@@ -2079,6 +2430,7 @@ export default function AdminPanel() {
       {/* ── Content ── */}
       <div className="admp-content">
         {activeTab === 'Users' && <UsersTab isAdmin={isAdmin} />}
+        {isAdmin && activeTab === 'Connection' && <ConnectionTab adminToken={adminToken} />}
         {isAdmin && activeTab === 'Team' && <TeamTab />}
         {isAdmin && activeTab === 'Notifications' && <NotificationsTab />}
         {isAdmin && activeTab === 'Indicators' && <IndicatorsTab />}

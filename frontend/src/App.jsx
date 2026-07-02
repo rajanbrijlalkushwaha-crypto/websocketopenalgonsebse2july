@@ -191,7 +191,8 @@ function AppContent() {
 
   // ── Socket.io live stream — tick-by-tick via Dragonfly pub/sub ──────────
   const socketRef = useRef(null);
-  const SOCKETIO_URL = '';
+  // Tick server on port 5900 — option-chain server (5800) has no Socket.io
+  const SOCKETIO_URL = `${window.location.protocol}//${window.location.hostname}:5900`;
 
   useEffect(() => {
     if (!state.currentSymbol || state.historicalMode) return;
@@ -221,21 +222,26 @@ function AppContent() {
 
     const socket = socketRef.current;
 
-    // Load initial snapshot — first from Dragonfly REST (instant), then live
-    fetch(`/socketio/api/chain/${state.currentSymbol}`)
-      .then(r => r.json())
-      .then(data => { if (data && data.chain && data.chain.length > 0) dispatch({ type: 'SET_LIVE_DATA', payload: data }); })
-      .catch(() => {
-        // Dragonfly has no data yet — fall back to SSE
-        fetchLiveData(state.currentSymbol)
-          .then(data => dispatch({ type: 'SET_LIVE_DATA', payload: data }))
-          .catch(() => {});
-      });
+    // Load initial snapshot via REST immediately
+    fetchLiveData(state.currentSymbol)
+      .then(data => { if (data?.chain?.length > 0) dispatch({ type: 'SET_LIVE_DATA', payload: data }); })
+      .catch(() => {});
 
-    // Subscribe to this underlying's chain updates
+    // Subscribe to this underlying's chain updates via Socket.io
     socket.emit('subscribe_chain', { underlying: state.currentSymbol });
 
+    // Slow poll for OI / IV / Greeks — LTP comes tick-by-tick via Socket.io.
+    let pollTimer;
+    const doPoll = () => {
+      fetchLiveData(state.currentSymbol)
+        .then(data => { if (data?.chain?.length > 0) dispatch({ type: 'SET_LIVE_DATA', payload: data }); })
+        .catch(() => {});
+      pollTimer = setTimeout(doPoll, 30000);
+    };
+    pollTimer = setTimeout(doPoll, 30000);
+
     return () => {
+      clearTimeout(pollTimer);
       // Unsubscribe when symbol changes
       if (socketRef.current) {
         socketRef.current.emit('unsubscribe_chain', { underlying: state.currentSymbol });

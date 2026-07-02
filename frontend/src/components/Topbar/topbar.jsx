@@ -2,7 +2,8 @@ import { useApp } from '../../context/AppContext';
 import HistoricalControls from '../Historical/HistoricalControls';
 import SymbolSelect from './SymbolSelect';
 import ExpirySelect from './ExpirySelect';
-import { useEffect, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import sioClient from '../../services/socketioClient';
 
 const API_BASE = process.env.REACT_APP_API_URL || '';
 
@@ -51,6 +52,43 @@ export default function Topbar() {
   const { state, dispatch } = useApp();
   const gift    = useGiftNifty();
   const signals = useAiSignals();
+  const timeRef   = useRef(null);
+  const spotRef   = useRef(null);
+  const lastTime  = useRef('');
+  const lastSpot  = useRef('');
+
+  // Live clock — updates every second regardless of ticks
+  useEffect(() => {
+    if (state.historicalMode) return;
+    function tick() {
+      const now = new Date();
+      const t = `${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}:${String(now.getSeconds()).padStart(2,'0')}`;
+      lastTime.current = t;
+      if (timeRef.current) timeRef.current.textContent = t;
+    }
+    tick();
+    const id = setInterval(tick, 1000);
+    return () => clearInterval(id);
+  }, [state.historicalMode]);
+
+  // Spot price — updates on each underlying tick via DOM mutation
+  useEffect(() => {
+    if (!state.currentSymbol || state.historicalMode) return;
+    return sioClient.subscribe(state.currentSymbol, (data) => {
+      const ltp = data?.ltp ?? data?.last_price ?? data?.price;
+      if (ltp != null) {
+        const s = Number(ltp).toLocaleString('en-IN', { maximumFractionDigits: 2 });
+        lastSpot.current = s;
+        if (spotRef.current) spotRef.current.textContent = s;
+      }
+    });
+  }, [state.currentSymbol, state.historicalMode]);
+
+  // Re-apply DOM values after every React render (prevents re-render from overwriting)
+  useLayoutEffect(() => {
+    if (lastTime.current && timeRef.current) timeRef.current.textContent = lastTime.current;
+    if (lastSpot.current && spotRef.current) spotRef.current.textContent = lastSpot.current;
+  });
 
   const topRes = signals?.resistance?.[0] ?? null;
   const topSup = signals?.support?.[0] ?? null;
@@ -89,9 +127,17 @@ export default function Topbar() {
           </div>
           <div>TIME: {state.loading && state.currentTime === '--'
             ? <span className="skeleton skeleton-topbar" />
-            : <span>{state.currentTime}</span>}
+            : <span ref={timeRef}>{state.currentTime}</span>}
           </div>
           <div>LOT: <span style={{ color: '#ff6f00', fontWeight: 700 }}>{state.lotSize}</span></div>
+          {!state.historicalMode && state.currentSymbol && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+              <span style={{ color: '#888', fontWeight: 600 }}>{state.currentSymbol}:</span>
+              <span ref={spotRef} style={{ color: '#ffeb3b', fontWeight: 700 }}>
+                {state.currentSpot ? Number(state.currentSpot).toLocaleString('en-IN', { maximumFractionDigits: 2 }) : '--'}
+              </span>
+            </div>
+          )}
 
           {/* GIFT Nifty */}
           {gift && (

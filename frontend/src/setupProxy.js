@@ -19,27 +19,34 @@ module.exports = function(app) {
     }
   };
 
-  // HTTP API proxy
+  // HTTP API proxy → option-chain Flask server (port 5800)
   app.use('/api', createProxyMiddleware({
-    target: 'http://localhost:3000',
+    target: 'http://localhost:5800',
     changeOrigin: true,
     logLevel: 'silent',
     on: { error: onError },
   }));
 
-  // WebSocket proxy — only /ws/chart (our backend WS).
-  // Do NOT proxy /ws — that path belongs to webpack HMR.
-  app.use('/ws/chart', createProxyMiddleware({
-    target: 'http://localhost:3000',
+  // Admin API proxy → option-chain Flask server (port 5800) — collector control
+  app.use('/admin/api', createProxyMiddleware({
+    target: 'http://localhost:5800',
     changeOrigin: true,
-    ws: true,
     logLevel: 'silent',
     on: { error: onError },
   }));
 
-  // Socket.IO proxy — for live option chain tick-by-tick
+  // Tick server health → standalone tick Socket.io server (port 5900)
+  app.use('/tick-health', createProxyMiddleware({
+    target: 'http://localhost:5900',
+    changeOrigin: true,
+    pathRewrite: { '^/tick-health': '/health' },
+    logLevel: 'silent',
+    on: { error: onError },
+  }));
+
+  // Socket.IO proxy → Node.js Socket.io server (port 5900)
   app.use('/socket.io', createProxyMiddleware({
-    target: 'http://localhost:3000',
+    target: 'http://localhost:5900',
     changeOrigin: true,
     ws: true,
     logLevel: 'silent',

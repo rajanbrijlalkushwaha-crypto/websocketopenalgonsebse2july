@@ -93,7 +93,12 @@ class OptionChainManager:
         self.manager_id = f"{underlying}_{expiry}"
     
     def initialize(self, api_client):
-        """Setup option chain with depth subscriptions"""
+        """Setup option chain with depth subscriptions.
+
+        Strike structure + ATM are set synchronously so the caller can return an
+        (empty-LTP) chain immediately. Quotes are then fetched in a background
+        thread so the first API response is not blocked by 82 REST calls.
+        """
         if self.initialized:
             logger.info(f"Option chain already initialized for {self.underlying}")
             return True
@@ -107,8 +112,15 @@ class OptionChainManager:
         self.calculate_atm()
         self.generate_strikes()
         self.setup_depth_subscriptions()
-        self.populate_initial_quotes(api_client)
-        self.initialized = True
+        self.initialized = True  # mark ready so callers can return structure now
+
+        # Fetch quotes in background — fills in LTPs without blocking the caller
+        threading.Thread(
+            target=self.populate_initial_quotes,
+            args=(api_client,),
+            daemon=True,
+            name=f"init-quotes-{self.manager_id}",
+        ).start()
         return True
     
     def _mcx_futures_symbol(self):
@@ -375,7 +387,7 @@ class OptionChainManager:
                 return symbol, 0
 
             logger.info(f"Fetching prev-day OI for {len(symbols)} symbols ({start_date} → {end_date})")
-            with ThreadPoolExecutor(max_workers=8) as executor:
+            with ThreadPoolExecutor(max_workers=50) as executor:
                 for sym, oi in executor.map(hist_one, symbols):
                     if oi:
                         prev_oi_map[sym] = oi
@@ -386,12 +398,18 @@ class OptionChainManager:
         return prev_oi_map
 
     def populate_initial_quotes(self, api_client):
-        """Fetch REST quotes for all strikes so initial page render shows real data"""
+        """Fetch REST quotes for all strikes so initial page render shows real data.
+
+        Quotes are fetched first (unblocked) so the page can render immediately.
+        Prev-day OI is fetched in background and merged in once ready.
+        """
         if not self.option_data:
             return
 
-        # Fetch yesterday's closing OI via 2-day history for all symbols in parallel
-        prev_oi_map = self._fetch_prev_day_oi(api_client)
+        symbols = []
+        for strike_data in self.option_data.values():
+            symbols.append(strike_data['ce_symbol'])
+            symbols.append(strike_data['pe_symbol'])
 
         def fetch_one(symbol):
             try:
@@ -399,13 +417,11 @@ class OptionChainManager:
                 if resp.get('status') == 'success':
                     d = resp.get('data', {})
                     oi = int(d.get('oi', 0) or 0)
-                    # Use yesterday's closing OI as baseline; fall back to current OI
-                    open_oi = prev_oi_map.get(symbol, oi)
                     return symbol, {
                         'ltp':        float(d.get('ltp', 0) or 0),
                         'volume':     int(d.get('volume', 0) or 0),
                         'oi':         oi,
-                        'open_oi':    open_oi,
+                        'open_oi':    oi,
                         'prev_close': float(d.get('prev_close', 0) or 0),
                         'iv':         float(d.get('iv', 0) or 0),
                     }
@@ -413,13 +429,9 @@ class OptionChainManager:
                 logger.debug(f"REST quote fetch failed for {symbol}: {e}")
             return symbol, {}
 
-        symbols = []
-        for strike_data in self.option_data.values():
-            symbols.append(strike_data['ce_symbol'])
-            symbols.append(strike_data['pe_symbol'])
-
         logger.info(f"Fetching initial REST quotes for {len(symbols)} option symbols")
-        with ThreadPoolExecutor(max_workers=10) as executor:
+        t0 = time.time()
+        with ThreadPoolExecutor(max_workers=50) as executor:
             futures = {executor.submit(fetch_one, sym): sym for sym in symbols}
             for future in as_completed(futures):
                 symbol, fields = future.result()
@@ -429,6 +441,12 @@ class OptionChainManager:
                     if strike in self.option_data:
                         key = 'ce_data' if opt_type == 'CE' else 'pe_data'
                         self.option_data[strike][key].update(fields)
+
+        non_zero = sum(
+            1 for sd in self.option_data.values()
+            if sd['ce_data']['ltp'] or sd['pe_data']['ltp']
+        )
+        logger.info(f"Initial REST quotes done in {time.time()-t0:.2f}s: {non_zero}/{len(self.option_data)} strikes have data")
 
         # Also refresh underlying LTP
         try:
@@ -444,11 +462,23 @@ class OptionChainManager:
         except Exception as e:
             logger.debug(f"Underlying LTP refresh failed: {e}")
 
-        non_zero = sum(
-            1 for sd in self.option_data.values()
-            if sd['ce_data']['ltp'] or sd['pe_data']['ltp']
-        )
-        logger.info(f"Initial REST quotes done: {non_zero}/{len(self.option_data)} strikes have data")
+        # Fetch prev-day OI in background so initial render is not blocked
+        def _backfill_open_oi():
+            prev_oi_map = self._fetch_prev_day_oi(api_client)
+            if not prev_oi_map:
+                return
+            updated = 0
+            for sym, oi in prev_oi_map.items():
+                if sym in self.subscription_map:
+                    info = self.subscription_map[sym]
+                    strike, opt_type = info['strike'], info['type']
+                    if strike in self.option_data:
+                        key = 'ce_data' if opt_type == 'CE' else 'pe_data'
+                        self.option_data[strike][key]['open_oi'] = oi
+                        updated += 1
+            logger.info(f"Background OI backfill done: {updated} symbols updated")
+
+        threading.Thread(target=_backfill_open_oi, daemon=True, name=f"oi-backfill-{self.manager_id}").start()
 
     def setup_depth_subscriptions(self):
         """Configure WebSocket subscriptions"""
@@ -676,6 +706,81 @@ class OptionChainManager:
     
     def start_monitoring(self):
         self.monitoring_active = True
-    
+
     def stop_monitoring(self):
         self.monitoring_active = False
+
+    def start_rest_refresh(self, api_client, interval=15):
+        """Background thread that refreshes quotes via REST during market hours.
+        Provides reliable LTP updates as a fallback when WebSocket ticks are absent."""
+        import pytz as _pytz
+
+        def _is_market_open():
+            ist = datetime.now(_pytz.timezone('Asia/Kolkata'))
+            if ist.weekday() >= 5:  # Saturday/Sunday
+                return False
+            t = ist.hour * 60 + ist.minute
+            return 555 <= t <= 930  # 9:15 AM to 3:30 PM
+
+        def _refresh_loop():
+            while self.initialized:
+                try:
+                    if not _is_market_open():
+                        time.sleep(60)
+                        continue
+
+                    # Refresh underlying LTP
+                    try:
+                        if self.is_mcx:
+                            resp = api_client.quotes(symbol=self._mcx_futures_symbol(), exchange='MCX')
+                        else:
+                            resp = api_client.quotes(symbol=self.underlying, exchange=self.index_exchange)
+                        if resp.get('status') == 'success':
+                            ltp = float(resp['data'].get('ltp') or 0)
+                            if ltp:
+                                self.underlying_ltp = ltp
+                    except Exception:
+                        pass
+
+                    # Refresh ATM ±5 strikes (most-traded options)
+                    if self.option_data and self.atm_strike:
+                        strikes_to_refresh = sorted(self.option_data.keys())
+                        atm_idx = next((i for i, s in enumerate(strikes_to_refresh) if s == self.atm_strike), None)
+                        if atm_idx is not None:
+                            near = strikes_to_refresh[max(0, atm_idx-5):atm_idx+6]
+                            symbols = []
+                            for s in near:
+                                symbols.append(self.option_data[s]['ce_symbol'])
+                                symbols.append(self.option_data[s]['pe_symbol'])
+
+                            with ThreadPoolExecutor(max_workers=20) as ex:
+                                def _fetch(sym):
+                                    try:
+                                        r = api_client.quotes(symbol=sym, exchange=self.exchange)
+                                        if r.get('status') == 'success':
+                                            d = r.get('data', {})
+                                            return sym, {
+                                                'ltp':    float(d.get('ltp', 0) or 0),
+                                                'volume': int(d.get('volume', 0) or 0),
+                                                'oi':     int(d.get('oi', 0) or 0),
+                                            }
+                                    except Exception:
+                                        pass
+                                    return sym, {}
+                                for sym, fields in ex.map(_fetch, symbols):
+                                    if fields and sym in self.subscription_map:
+                                        info = self.subscription_map[sym]
+                                        strike, opt_type = info['strike'], info['type']
+                                        if strike in self.option_data:
+                                            key = 'ce_data' if opt_type == 'CE' else 'pe_data'
+                                            for f, v in fields.items():
+                                                if v:
+                                                    self.option_data[strike][key][f] = v
+
+                except Exception as e:
+                    logger.debug(f"REST refresh error: {e}")
+
+                time.sleep(interval)
+
+        threading.Thread(target=_refresh_loop, daemon=True, name=f"rest-refresh-{self.manager_id}").start()
+        logger.info(f"REST refresh thread started for {self.manager_id} (interval={interval}s)")

@@ -70,6 +70,25 @@ services:
       timeout: 10s
       retries: 5
 
+  # ── TimescaleDB (PostgreSQL + time-series extension) ────────────────
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
+    container_name: timescaledb
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: ticks
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: openalgo2024
+    volumes:
+      - timescaledb_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d ticks"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   # ── Kafka UI (dev only) ──────────────────────────────────────────────
   kafka-ui:
     image: provectuslabs/kafka-ui:latest
@@ -90,3 +109,4 @@ volumes:
   kafka_data:
   dragonfly_data:
   influxdb_data:
+  timescaledb_data:

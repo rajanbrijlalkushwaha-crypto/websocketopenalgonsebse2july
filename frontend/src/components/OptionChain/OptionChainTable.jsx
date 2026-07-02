@@ -1,4 +1,4 @@
-import React, { useMemo, useEffect, useRef, useState } from 'react';
+import React, { useMemo, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useApp } from '../../context/AppContext';
 import {
   fix, formatReversal, calculateSupport, calculateResistance,
@@ -6,6 +6,55 @@ import {
   calculateVT, getRankClass, getColumnStats,
 } from '../../services/calculations';
 import PCRChartModal from '../Chart/PCRChartModal';
+import sioClient from '../../services/socketioClient';
+
+// ── Black-Scholes Greeks (runs in browser on every tick) ──────────────────────
+function _normCdf(x) {
+  const a1=0.254829592,a2=-0.284496736,a3=1.421413741,a4=-1.453152027,a5=1.061405429,p=0.3275911;
+  const sign = x < 0 ? -1 : 1;
+  const t = 1 / (1 + p * Math.abs(x) / Math.SQRT2);
+  const y = 1 - (((((a5*t+a4)*t+a3)*t+a2)*t+a1)*t) * Math.exp(-x*x/2);
+  return 0.5 * (1 + sign * y);
+}
+function _normPdf(x) { return Math.exp(-0.5*x*x) / Math.sqrt(2*Math.PI); }
+function _bsPrice(S, K, T, r, sig, call) {
+  if (T<=0||sig<=0) return call ? Math.max(S-K,0) : Math.max(K-S,0);
+  const sq=Math.sqrt(T), d1=(Math.log(S/K)+(r+0.5*sig*sig)*T)/(sig*sq), d2=d1-sig*sq;
+  return call ? S*_normCdf(d1)-K*Math.exp(-r*T)*_normCdf(d2)
+              : K*Math.exp(-r*T)*_normCdf(-d2)-S*_normCdf(-d1);
+}
+function _bsIV(price, S, K, T, call, r=0.065) {
+  if (T<=0||price<=0||S<=0||K<=0) return 0;
+  if (price <= (call?Math.max(S-K,0):Math.max(K-S,0))+1e-6) return 0;
+  let lo=0.001, hi=10;
+  for (let i=0; i<80; i++) {
+    const mid=(lo+hi)/2;
+    _bsPrice(S,K,T,r,mid,call)<price ? lo=mid : hi=mid;
+    if (hi-lo<1e-5) break;
+  }
+  return (lo+hi)/2;
+}
+function _bsGreeks(S, K, T, iv, call, r=0.065) {
+  if (T<=0||iv<=0||S<=0||K<=0) return {iv:0,delta:0,gamma:0,theta:0,vega:0};
+  const sq=Math.sqrt(T), d1=(Math.log(S/K)+(r+0.5*iv*iv)*T)/(iv*sq), d2=d1-iv*sq;
+  const nd1=_normPdf(d1), gamma=nd1/(S*iv*sq), vega=S*nd1*sq/100;
+  const delta=call?_normCdf(d1):_normCdf(d1)-1;
+  const theta=call
+    ?(-S*nd1*iv/(2*sq)-r*K*Math.exp(-r*T)*_normCdf(d2))/365
+    :(-S*nd1*iv/(2*sq)+r*K*Math.exp(-r*T)*_normCdf(-d2))/365;
+  return {iv:+(iv*100).toFixed(2),delta:+delta.toFixed(4),gamma:+gamma.toFixed(6),theta:+theta.toFixed(4),vega:+vega.toFixed(4)};
+}
+function _computeT(expiryStr) {
+  if (!expiryStr||expiryStr==='--') return 0;
+  const MON={JAN:0,FEB:1,MAR:2,APR:3,MAY:4,JUN:5,JUL:6,AUG:7,SEP:8,OCT:9,NOV:10,DEC:11};
+  try {
+    const m = expiryStr.replace(/-/g,'').match(/^(\d{1,2})([A-Z]{3})(\d{2,4})$/i);
+    if (!m) return 0;
+    const yr = m[3].length===2 ? 2000+parseInt(m[3]) : parseInt(m[3]);
+    const exp = new Date(Date.UTC(yr, MON[m[2].toUpperCase()], parseInt(m[1]), 10, 0, 0));
+    return Math.max((exp-Date.now())/(365.25*24*3600*1e3), 0);
+  } catch { return 0; }
+}
 
 export default function OptionChainTable() {
   const { state, dispatch } = useApp();
@@ -15,6 +64,35 @@ export default function OptionChainTable() {
   const [selectedSLevel, setSelectedSLevel]   = useState(null); // { strike, type } for highlight
   const committedSourceRef                     = useRef(null);   // confirmed source data
   const singleClickTimerRef                   = useRef(null);   // distinguishes click vs dblclick
+
+  // DOM refs — direct mutation, no React re-render per tick
+  const ceLtpRefs   = useRef({});
+  const peLtpRefs   = useRef({});
+  const ceVolRefs   = useRef({});
+  const peVolRefs   = useRef({});
+  const ceOiRefs    = useRef({});
+  const peOiRefs    = useRef({});
+  const ceIvRefs    = useRef({});
+  const peIvRefs    = useRef({});
+  const ceDeltaRefs = useRef({});
+  const peDeltaRefs = useRef({});
+  const ceGammaRefs = useRef({});
+  const peGammaRefs = useRef({});
+  const ceThetaRefs = useRef({});
+  const peThetaRefs = useRef({});
+  const ceVegaRefs  = useRef({});
+  const peVegaRefs  = useRef({});
+  const spotTickRef = useRef(null);
+
+  // Latest tick values per strike — survive React re-renders
+  const lastCeData  = useRef({});  // strike → {ltp,vol,oi,iv,delta,gamma,theta,vega}
+  const lastPeData  = useRef({});
+  const lastSpotLtp = useRef(null);
+
+  // Mirrors of React state for use inside tick-handler closures
+  const _TRef      = useRef(0);
+  const lotSizeRef = useRef(1);
+  const spotRef    = useRef(0);
 
   // Clear highlight whenever popup closes
   useEffect(() => {
@@ -36,6 +114,11 @@ export default function OptionChainTable() {
     volOiCngData, volOiCngWindow,
     currentExpiry, currentDataDate, currentTime, historicalMode,
   } = state;
+
+  // Keep refs in sync with state (safe here — state is now declared above)
+  useEffect(() => { lotSizeRef.current = lotSize || 1; }, [lotSize]);
+  useEffect(() => { spotRef.current    = currentSpot; }, [currentSpot]);
+  useEffect(() => { _TRef.current      = _computeT(currentExpiry); }, [currentExpiry]);
 
   // Format a raw OI/VOL value into lots (divide by lotSize)
   // showInLakh=false (default): full number; showInLakh=true: compact K/L
@@ -81,6 +164,140 @@ export default function OptionChainTable() {
     if (tableReversed) chain.reverse();
     return chain;
   }, [chainData, currentSpot, atmActive, tableReversed]);
+
+  // Subscribe to tick-by-tick updates for all visible strikes
+  useEffect(() => {
+    if (!displayChain.length || !currentSymbol || !currentExpiry || historicalMode) return;
+
+    const expiryClean = currentExpiry.replace(/-/g, '');
+    const lots = () => lotSizeRef.current || 1;
+    const fmt = (v) => {
+      const n = Math.round((v||0) / lots());
+      if (n >= 100000) return (n/100000).toFixed(1)+'L';
+      if (n >= 1000)   return (n/1000).toFixed(1)+'K';
+      return String(n);
+    };
+
+    const applyGreeks = (refs, g) => {
+      if (refs.iv    && g.iv    != null) refs.iv.textContent    = g.iv;
+      if (refs.delta && g.delta != null) refs.delta.textContent = g.delta;
+      if (refs.gamma && g.gamma != null) refs.gamma.textContent = g.gamma;
+      if (refs.theta && g.theta != null) refs.theta.textContent = g.theta;
+      if (refs.vega  && g.vega  != null) refs.vega.textContent  = g.vega;
+    };
+
+    const unsubs = [];
+
+    // Spot tick — update spot display AND recalculate Greeks for all strikes
+    const spotUnsub = sioClient.subscribe(currentSymbol, (tick) => {
+      if (!tick.ltp) return;
+      lastSpotLtp.current = tick.ltp;
+      spotRef.current     = tick.ltp;
+      if (spotTickRef.current) spotTickRef.current.textContent = tick.ltp.toFixed(2);
+
+      const T = _TRef.current;
+      if (T <= 0) return;
+      for (const row of displayChain) {
+        const s = row.strike;
+        const ce = lastCeData.current[s];
+        if (ce?.ltp) {
+          const iv = _bsIV(ce.ltp, tick.ltp, s, T, true);
+          if (iv > 0) {
+            const g = _bsGreeks(tick.ltp, s, T, iv, true);
+            lastCeData.current[s] = { ...ce, ...g };
+            applyGreeks({ iv: ceIvRefs.current[s], delta: ceDeltaRefs.current[s], gamma: ceGammaRefs.current[s], theta: ceThetaRefs.current[s], vega: ceVegaRefs.current[s] }, g);
+          }
+        }
+        const pe = lastPeData.current[s];
+        if (pe?.ltp) {
+          const iv = _bsIV(pe.ltp, tick.ltp, s, T, false);
+          if (iv > 0) {
+            const g = _bsGreeks(tick.ltp, s, T, iv, false);
+            lastPeData.current[s] = { ...pe, ...g };
+            applyGreeks({ iv: peIvRefs.current[s], delta: peDeltaRefs.current[s], gamma: peGammaRefs.current[s], theta: peThetaRefs.current[s], vega: peVegaRefs.current[s] }, g);
+          }
+        }
+      }
+    });
+    unsubs.push(spotUnsub);
+
+    // CE/PE ticks — update LTP, Vol, OI and recalculate Greeks
+    for (const row of displayChain) {
+      const strike = row.strike;
+      const ceSym  = `${currentSymbol}${expiryClean}${strike}CE`;
+      const peSym  = `${currentSymbol}${expiryClean}${strike}PE`;
+
+      const ceUnsub = sioClient.subscribe(ceSym, (tick) => {
+        if (tick.ltp == null) return;
+        const S = spotRef.current, T = _TRef.current;
+        const iv = T > 0 && S > 0 ? _bsIV(tick.ltp, S, strike, T, true) : 0;
+        const g  = iv > 0 ? _bsGreeks(S, strike, T, iv, true) : {};
+        const data = { ...lastCeData.current[strike], ltp: tick.ltp, vol: tick.volume, oi: tick.oi, ...g };
+        lastCeData.current[strike] = data;
+
+        if (ceLtpRefs.current[strike])  ceLtpRefs.current[strike].textContent  = tick.ltp.toFixed(2);
+        if (ceVolRefs.current[strike] && tick.volume) ceVolRefs.current[strike].textContent = fmt(tick.volume);
+        if (ceOiRefs.current[strike]  && tick.oi)    ceOiRefs.current[strike].textContent  = fmt(tick.oi);
+        if (iv > 0) applyGreeks({ iv: ceIvRefs.current[strike], delta: ceDeltaRefs.current[strike], gamma: ceGammaRefs.current[strike], theta: ceThetaRefs.current[strike], vega: ceVegaRefs.current[strike] }, g);
+      });
+
+      const peUnsub = sioClient.subscribe(peSym, (tick) => {
+        if (tick.ltp == null) return;
+        const S = spotRef.current, T = _TRef.current;
+        const iv = T > 0 && S > 0 ? _bsIV(tick.ltp, S, strike, T, false) : 0;
+        const g  = iv > 0 ? _bsGreeks(S, strike, T, iv, false) : {};
+        const data = { ...lastPeData.current[strike], ltp: tick.ltp, vol: tick.volume, oi: tick.oi, ...g };
+        lastPeData.current[strike] = data;
+
+        if (peLtpRefs.current[strike])  peLtpRefs.current[strike].textContent  = tick.ltp.toFixed(2);
+        if (peVolRefs.current[strike] && tick.volume) peVolRefs.current[strike].textContent = fmt(tick.volume);
+        if (peOiRefs.current[strike]  && tick.oi)    peOiRefs.current[strike].textContent  = fmt(tick.oi);
+        if (iv > 0) applyGreeks({ iv: peIvRefs.current[strike], delta: peDeltaRefs.current[strike], gamma: peGammaRefs.current[strike], theta: peThetaRefs.current[strike], vega: peVegaRefs.current[strike] }, g);
+      });
+
+      unsubs.push(ceUnsub, peUnsub);
+    }
+
+    return () => unsubs.forEach(u => u());
+  }, [displayChain, currentSymbol, currentExpiry, historicalMode]);
+
+  // Re-apply ALL latest tick values after every React render (before browser paint).
+  // Prevents REST/chain re-renders from showing stale values over tick-updated ones.
+  useLayoutEffect(() => {
+    if (lastSpotLtp.current !== null && spotTickRef.current)
+      spotTickRef.current.textContent = lastSpotLtp.current.toFixed(2);
+
+    const lots = lotSizeRef.current || 1;
+    const fmt = (v) => {
+      const n = Math.round((v||0)/lots);
+      if (n >= 100000) return (n/100000).toFixed(1)+'L';
+      if (n >= 1000)   return (n/1000).toFixed(1)+'K';
+      return String(n);
+    };
+
+    for (const [s, d] of Object.entries(lastCeData.current)) {
+      const k = +s;
+      if (d.ltp  != null && ceLtpRefs.current[k])   ceLtpRefs.current[k].textContent   = d.ltp.toFixed(2);
+      if (d.vol  != null && ceVolRefs.current[k])    ceVolRefs.current[k].textContent    = fmt(d.vol);
+      if (d.oi   != null && ceOiRefs.current[k])     ceOiRefs.current[k].textContent     = fmt(d.oi);
+      if (d.iv   != null && ceIvRefs.current[k])     ceIvRefs.current[k].textContent     = d.iv;
+      if (d.delta != null && ceDeltaRefs.current[k]) ceDeltaRefs.current[k].textContent  = d.delta;
+      if (d.gamma != null && ceGammaRefs.current[k]) ceGammaRefs.current[k].textContent  = d.gamma;
+      if (d.theta != null && ceThetaRefs.current[k]) ceThetaRefs.current[k].textContent  = d.theta;
+      if (d.vega  != null && ceVegaRefs.current[k])  ceVegaRefs.current[k].textContent   = d.vega;
+    }
+    for (const [s, d] of Object.entries(lastPeData.current)) {
+      const k = +s;
+      if (d.ltp  != null && peLtpRefs.current[k])   peLtpRefs.current[k].textContent   = d.ltp.toFixed(2);
+      if (d.vol  != null && peVolRefs.current[k])    peVolRefs.current[k].textContent    = fmt(d.vol);
+      if (d.oi   != null && peOiRefs.current[k])     peOiRefs.current[k].textContent     = fmt(d.oi);
+      if (d.iv   != null && peIvRefs.current[k])     peIvRefs.current[k].textContent     = d.iv;
+      if (d.delta != null && peDeltaRefs.current[k]) peDeltaRefs.current[k].textContent  = d.delta;
+      if (d.gamma != null && peGammaRefs.current[k]) peGammaRefs.current[k].textContent  = d.gamma;
+      if (d.theta != null && peThetaRefs.current[k]) peThetaRefs.current[k].textContent  = d.theta;
+      if (d.vega  != null && peVegaRefs.current[k])  peVegaRefs.current[k].textContent   = d.vega;
+    }
+  });
 
   // Build strike map
   const strikeMap = useMemo(() => {
@@ -660,7 +877,7 @@ export default function OptionChainTable() {
                         onClick={() => dispatch({ type: 'SET_CHART_MODAL', payload: true })}
                       >
                         <span className="spot-label">SPOT</span>
-                        <span className="spot-value">{currentSpot.toFixed(2)}</span>
+                        <span className="spot-value" ref={spotTickRef}>{currentSpot.toFixed(2)}</span>
                         {spotChange !== 0 && (
                           <span className={`spot-diff ${spotChange >= 0 ? 'spot-diff-up' : 'spot-diff-down'}`}>
                             {spotChange >= 0 ? '+' : ''}{spotChange.toFixed(2)} ({spotPctChange >= 0 ? '+' : ''}{spotPctChange.toFixed(2)}%)
@@ -710,11 +927,11 @@ export default function OptionChainTable() {
                 {/* Call Greeks */}
                 {greeksActive && <>
                   <td className={`greek-col ${isCallITM}`}>{r.call?.pop || '-'}</td>
-                  <td className={`greek-col ${isCallITM}`}>{r.call?.vega || '-'}</td>
-                  <td className={`greek-col ${isCallITM}`}>{r.call?.gamma || '-'}</td>
-                  <td className={`greek-col ${isCallITM}`}>{r.call?.theta || '-'}</td>
-                  <td className={`greek-col ${isCallITM}`}>{r.call?.delta || '-'}</td>
-                  <td className={`greek-col ${isCallITM}`}>{r.call?.iv || '-'}</td>
+                  <td className={`greek-col ${isCallITM}`}><span ref={el => { ceVegaRefs.current[r.strike]  = el; }}>{r.call?.vega  || '-'}</span></td>
+                  <td className={`greek-col ${isCallITM}`}><span ref={el => { ceGammaRefs.current[r.strike] = el; }}>{r.call?.gamma || '-'}</span></td>
+                  <td className={`greek-col ${isCallITM}`}><span ref={el => { ceThetaRefs.current[r.strike] = el; }}>{r.call?.theta || '-'}</span></td>
+                  <td className={`greek-col ${isCallITM}`}><span ref={el => { ceDeltaRefs.current[r.strike] = el; }}>{r.call?.delta || '-'}</span></td>
+                  <td className={`greek-col ${isCallITM}`}><span ref={el => { ceIvRefs.current[r.strike]    = el; }}>{r.call?.iv    || '-'}</span></td>
                 </>}
 
                 {/* Call OI Chng */}
@@ -742,7 +959,7 @@ export default function OptionChainTable() {
                     className={`data-col-cell ${callOIHighlight || isCallITM} oi-clickable`}
                     onClick={() => handleOIClick(r.strike, 'call')}
                   >
-                    <span>{fmtLots(r.call?.oi)}</span>
+                    <span ref={el => { ceOiRefs.current[r.strike] = el; }}>{fmtLots(r.call?.oi)}</span>
                     <span className="perc-val">{callOIPct}%</span>
                   </td>
                 )}
@@ -750,7 +967,7 @@ export default function OptionChainTable() {
                 {/* Call Volume */}
                 {volumeDisplayActive && (
                   <td className={`data-col-cell ${callVOHighlight || isCallITM}`}>
-                    <span>{fmtLots(r.call?.volume)}</span>
+                    <span ref={el => { ceVolRefs.current[r.strike] = el; }}>{fmtLots(r.call?.volume)}</span>
                     <span className="perc-val">{callVOPct}%</span>
                   </td>
                 )}
@@ -760,6 +977,7 @@ export default function OptionChainTable() {
                   <td className={`ltp-col-cell ${isCallITM}`}>
                     <span
                       className="ltp-val"
+                      ref={el => { ceLtpRefs.current[r.strike] = el; }}
                       onClick={() => handleLtpClick('call', r.strike, parseFloat(r.call?.ltp || 0), callDelta)}
                     >
                       {fix(r.call?.ltp)}
@@ -911,6 +1129,7 @@ export default function OptionChainTable() {
                   <td className={`ltp-col-cell ${isPutITM}`}>
                     <span
                       className="ltp-val"
+                      ref={el => { peLtpRefs.current[r.strike] = el; }}
                       onClick={() => handleLtpClick('put', r.strike, parseFloat(r.put?.ltp || 0), putDelta)}
                     >
                       {fix(r.put?.ltp)}
@@ -924,7 +1143,7 @@ export default function OptionChainTable() {
                 {/* Put Volume */}
                 {volumeDisplayActive && (
                   <td className={`data-col-cell ${putVOHighlight || isPutITM}`}>
-                    <span>{fmtLots(r.put?.volume)}</span>
+                    <span ref={el => { peVolRefs.current[r.strike] = el; }}>{fmtLots(r.put?.volume)}</span>
                     <span className="perc-val">{putVOPct}%</span>
                   </td>
                 )}
@@ -935,7 +1154,7 @@ export default function OptionChainTable() {
                     className={`data-col-cell ${putOIHighlight || isPutITM} oi-clickable`}
                     onClick={() => handleOIClick(r.strike, 'put')}
                   >
-                    <span>{fmtLots(r.put?.oi)}</span>
+                    <span ref={el => { peOiRefs.current[r.strike] = el; }}>{fmtLots(r.put?.oi)}</span>
                     <span className="perc-val">{putOIPct}%</span>
                   </td>
                 )}
@@ -961,11 +1180,11 @@ export default function OptionChainTable() {
 
                 {/* Put Greeks */}
                 {greeksActive && <>
-                  <td className={`greek-col ${isPutITM}`}>{r.put?.iv || '-'}</td>
-                  <td className={`greek-col ${isPutITM}`}>{r.put?.delta || '-'}</td>
-                  <td className={`greek-col ${isPutITM}`}>{r.put?.theta || '-'}</td>
-                  <td className={`greek-col ${isPutITM}`}>{r.put?.gamma || '-'}</td>
-                  <td className={`greek-col ${isPutITM}`}>{r.put?.vega || '-'}</td>
+                  <td className={`greek-col ${isPutITM}`}><span ref={el => { peIvRefs.current[r.strike]    = el; }}>{r.put?.iv    || '-'}</span></td>
+                  <td className={`greek-col ${isPutITM}`}><span ref={el => { peDeltaRefs.current[r.strike] = el; }}>{r.put?.delta || '-'}</span></td>
+                  <td className={`greek-col ${isPutITM}`}><span ref={el => { peThetaRefs.current[r.strike] = el; }}>{r.put?.theta || '-'}</span></td>
+                  <td className={`greek-col ${isPutITM}`}><span ref={el => { peGammaRefs.current[r.strike] = el; }}>{r.put?.gamma || '-'}</span></td>
+                  <td className={`greek-col ${isPutITM}`}><span ref={el => { peVegaRefs.current[r.strike]  = el; }}>{r.put?.vega  || '-'}</span></td>
                   <td className={`greek-col ${isPutITM}`}>{r.put?.pop || '-'}</td>
                 </>}
 

@@ -157,6 +157,8 @@ function App() {
               <Route path="/faq" element={<Faq />} />
               <Route path="/setup" element={<Setup />} />
               <Route path="/login" element={<Login />} />
+              {/* Secret login path — only this URL is served by Flask; /login returns 404 */}
+              <Route path="/sysadmin123" element={<Login />} />
               <Route path="/reset-password" element={<ResetPassword />} />
               <Route path="/download" element={<Download />} />
               <Route path="/error" element={<ServerError />} />

@@ -2,6 +2,8 @@ import os
 import re
 import secrets
 
+_SECRET_LOGIN_PATH = os.getenv("SECRET_LOGIN_PATH", "sysadmin123")
+
 from flask import (
     Blueprint,
     current_app,
@@ -301,7 +303,7 @@ def login():
     if session.get("logged_in"):
         return redirect("/dashboard")
 
-    return redirect("/login")
+    return redirect(f"/{_SECRET_LOGIN_PATH}")
 
 
 @auth_bp.route("/login/totp", methods=["POST"])

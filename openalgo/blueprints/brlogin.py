@@ -1094,3 +1094,50 @@ def samco_update_ip():
         "status": "success",
         "message": data.get("statusMessage", "IP updated successfully"),
     })
+
+
+@brlogin_bp.route("/angel/auto-login", methods=["GET", "POST"])
+@limiter.exempt
+def angel_auto_login():
+    """Trigger Angel One TOTP auto-login from within this process.
+    Localhost-only. Accepts GET to avoid CSRF (no state change risk — localhost only).
+    """
+    if request.remote_addr not in ("127.0.0.1", "::1"):
+        return jsonify({"status": "error", "message": "Localhost only"}), 403
+
+    from services.angel_autologin_service import trigger_angel_autologin_now
+
+    try:
+        success, message = trigger_angel_autologin_now()
+    except Exception as e:
+        logger.exception("Angel auto-login manual trigger failed")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+    if success:
+        return jsonify({"status": "success", "message": message})
+    return jsonify({"status": "error", "message": message}), 400
+
+
+@brlogin_bp.route("/upstox/auto-login", methods=["POST"])
+@limiter.limit(LOGIN_RATE_LIMIT_MIN)
+@limiter.limit(LOGIN_RATE_LIMIT_HOUR)
+def upstox_auto_login():
+    """Manually trigger the headless-browser Upstox auto-login (TOTP-based).
+
+    Mainly for testing UPSTOX_MOBILE_NUMBER / UPSTOX_PIN / UPSTOX_TOTP_SECRET
+    without waiting for the scheduled run. See services/upstox_autologin_service.py.
+    """
+    if "user" not in session:
+        return jsonify({"status": "error", "message": "Please login first."}), 401
+
+    from services.upstox_autologin_service import trigger_upstox_autologin_now
+
+    try:
+        success, message = trigger_upstox_autologin_now(headless=True)
+    except Exception as e:
+        logger.exception("Upstox auto-login manual trigger failed")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+    if success:
+        return jsonify({"status": "success", "message": message})
+    return jsonify({"status": "error", "message": message}), 400

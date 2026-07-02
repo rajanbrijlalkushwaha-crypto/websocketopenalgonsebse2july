@@ -3,11 +3,15 @@ React Frontend Serving Blueprint
 Serves the pre-built React app for migrated routes.
 """
 
+import os
 from pathlib import Path
 
-from flask import Blueprint, send_file, send_from_directory
+from flask import Blueprint, abort, send_file, send_from_directory
 
 react_bp = Blueprint("react", __name__)
+
+# Secret login path — change SECRET_LOGIN_PATH in .env to customise
+_SECRET_LOGIN_PATH = os.getenv("SECRET_LOGIN_PATH", "sysadmin123")
 
 # Path to the pre-built React frontend
 FRONTEND_DIST = Path(__file__).parent.parent / "frontend" / "dist"
@@ -55,10 +59,18 @@ def react_index():
     return serve_react_app()
 
 
-# Login route
+# Secret login route — only this path shows the login page
+@react_bp.route(f"/{_SECRET_LOGIN_PATH}")
+def react_secret_login():
+    return serve_react_app()
+
+
+# /login is intentionally blocked — anyone guessing the URL gets 404
+# Note: cannot use abort(404) here because app.py's 404 handler serves the React app.
+# Returning (body, status) directly bypasses the error handler.
 @react_bp.route("/login")
 def react_login():
-    return serve_react_app()
+    return "", 404
 
 
 # Setup route (initial admin setup)

@@ -361,6 +361,92 @@ def _chain_row(strike_data):
         'put':    row(pe),
     }
 
+_prev_baseline_cache = {}  # {"{symbol}_{expiry}": {'loaded_on': date_str, 'baselines': {strike: {...}}}}
+
+def _load_prev_day_baselines(symbol, expiry):
+    """Load last snapshot from the most recent saved date before today.
+    Returns {strike: {ce_ltp, ce_oi, pe_ltp, pe_oi}} or {}."""
+    from datetime import date as _d
+    cache_key = f"{symbol}_{expiry}"
+    today = _d.today().isoformat()
+
+    cached = _prev_baseline_cache.get(cache_key)
+    if cached and cached['loaded_on'] == today:
+        return cached['baselines']
+
+    exp_path = os.path.join(DATA_DIR, symbol, expiry)
+    try:
+        past_dates = sorted([
+            d for d in os.listdir(exp_path)
+            if os.path.isdir(os.path.join(exp_path, d)) and d < today
+        ])
+    except FileNotFoundError:
+        return {}
+
+    if not past_dates:
+        return {}
+
+    prev_date = past_dates[-1]
+    date_path = os.path.join(exp_path, prev_date)
+    try:
+        files = sorted([f for f in os.listdir(date_path) if f.endswith('.json')])
+    except FileNotFoundError:
+        return {}
+
+    if not files:
+        return {}
+
+    try:
+        with open(os.path.join(date_path, files[-1])) as _f:
+            snap = json.load(_f)
+    except Exception:
+        return {}
+
+    baselines = {}
+    for row in snap.get('chain', []):
+        strike = row.get('strike')
+        if strike:
+            baselines[strike] = {
+                'ce_ltp': row.get('call', {}).get('ltp', 0),
+                'ce_oi':  row.get('call', {}).get('oi', 0),
+                'pe_ltp': row.get('put',  {}).get('ltp', 0),
+                'pe_oi':  row.get('put',  {}).get('oi', 0),
+            }
+
+    _prev_baseline_cache[cache_key] = {'loaded_on': today, 'baselines': baselines}
+    logger.info(f"Prev-day baseline loaded for {symbol} {expiry} from {prev_date}: {len(baselines)} strikes")
+    return baselines
+
+
+def _apply_prev_day_changes(chain, symbol, expiry):
+    """Fill ltp_change / oi_change from saved prev-day baseline when broker returns zeros."""
+    baselines = _load_prev_day_baselines(symbol, expiry)
+    if not baselines:
+        return chain
+    enriched = []
+    for row in chain:
+        strike = row['strike']
+        base = baselines.get(strike)
+        if not base:
+            enriched.append(row); continue
+        call = dict(row['call'])
+        put  = dict(row['put'])
+        # Only fill when broker didn't provide it (prev_close == 0)
+        if not call.get('prev_close') and base['ce_ltp']:
+            call['prev_close'] = base['ce_ltp']
+            call['ltp_change'] = round((call.get('ltp') or 0) - base['ce_ltp'], 2)
+        if not put.get('prev_close') and base['pe_ltp']:
+            put['prev_close'] = base['pe_ltp']
+            put['ltp_change'] = round((put.get('ltp') or 0) - base['pe_ltp'], 2)
+        # OI change: use saved baseline when open_oi wasn't fetched (oi_change == 0 and oi != 0)
+        if call.get('oi') and not call.get('oi_change') and base['ce_oi']:
+            call['oi_change'] = call['oi'] - base['ce_oi']
+        if put.get('oi') and not put.get('oi_change') and base['pe_oi']:
+            put['oi_change'] = put['oi'] - base['pe_oi']
+        enriched.append({'strike': strike, 'call': call, 'put': put})
+    return enriched
+
+
 def _build_live_payload(manager):
     """Build SET_LIVE_DATA compatible payload from a manager"""
     import pytz as _pytz
@@ -372,6 +458,18 @@ def _build_live_payload(manager):
     chain   = [_chain_row(s) for s in sorted(data['options'], key=lambda x: x['strike'])]
     expiry  = data.get('expiry', '')
     ltp     = data.get('underlying_ltp', 0)
+
+    # Compute Greeks via Black-Scholes when broker doesn't provide them
+    try:
+        chain = _enrich_chain_greeks(chain, ltp, expiry, _now.isoformat())
+    except Exception:
+        pass
+
+    # Fill OI change + LTP change from prev-day saved snapshot when broker omits them
+    try:
+        chain = _apply_prev_day_changes(chain, manager.underlying, expiry)
+    except Exception:
+        pass
     pc      = data.get('underlying_prev_close', 0)
     chg     = round(ltp - pc, 2) if pc else 0
     pct     = round(chg / pc * 100, 2) if pc else 0
@@ -470,46 +568,306 @@ SYMBOL_GROUPS = {
 
 ALL_SYMS = NSE_INDEX_SYMS + BSE_INDEX_SYMS + sorted(NSE_FNO_SYMS) + MCX_SYMS
 
+DATA_DIR = os.path.join(os.path.dirname(__file__), '..', 'data')
+
 @app.route('/api/symbols')
 def api_symbols():
+    mode = request.args.get('mode', 'live')
+    if mode == 'historical':
+        syms = _hist_list_symbols()
+        return jsonify({
+            'success':     True,
+            'symbols':     syms,
+            'liveSymbols': syms,
+            'groups':      {'Saved': syms},
+        })
     return jsonify({
         'success':    True,
         'symbols':    ALL_SYMS,
         'liveSymbols':ALL_SYMS,
-        'groups':     SYMBOL_GROUPS,   # exchange-grouped for frontend dropdown
+        'groups':     SYMBOL_GROUPS,
     })
 
-def _get_or_init_manager(symbol):
-    """Get existing manager or create one for the symbol"""
-    client = get_api_client()
-    # Find any active manager for this symbol
-    for key, mgr in active_managers.items():
-        if mgr.underlying == symbol and mgr.initialized:
-            return mgr
-    # Create new one with first available expiry
-    from utils.option_chain import MCX_COMMODITIES
-    if symbol in MCX_COMMODITIES:  exch = 'MCX'
-    elif symbol in BSE_INDEX_SYMS: exch = 'BFO'
-    else:                          exch = 'NFO'
+
+## ════════════════════════════════════════
+##  HISTORICAL (SAVED SNAPSHOT) ENDPOINTS
+## ════════════════════════════════════════
+
+import math as _math
+from datetime import date as _date, datetime as _datetime, timezone as _tz
+
+_MON_MAP = {'JAN':1,'FEB':2,'MAR':3,'APR':4,'MAY':5,'JUN':6,
+            'JUL':7,'AUG':8,'SEP':9,'OCT':10,'NOV':11,'DEC':12}
+
+def _parse_expiry_date(exp_str):
+    """Parse '23-JUN-26' or '2026-06-21' → date object."""
+    parts = exp_str.split('-')
+    if len(parts) == 3:
+        if parts[1].isalpha():
+            dd = int(parts[0]); mm = _MON_MAP.get(parts[1].upper(), 1)
+            yy = int(parts[2]); yyyy = 2000 + yy if yy < 100 else yy
+            return _date(yyyy, mm, dd)
+        return _date(int(parts[0]), int(parts[1]), int(parts[2]))
+    return None
+
+def _norm_cdf(x):
+    return 0.5 * (1 + _math.erf(x / _math.sqrt(2)))
+
+def _norm_pdf(x):
+    return _math.exp(-0.5 * x * x) / _math.sqrt(2 * _math.pi)
+
+def _bs_price(S, K, T, r, sigma, is_call):
+    if T <= 0 or sigma <= 0:
+        return max(S - K, 0) if is_call else max(K - S, 0)
+    d1 = (_math.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * _math.sqrt(T))
+    d2 = d1 - sigma * _math.sqrt(T)
+    if is_call:
+        return S * _norm_cdf(d1) - K * _math.exp(-r * T) * _norm_cdf(d2)
+    return K * _math.exp(-r * T) * _norm_cdf(-d2) - S * _norm_cdf(-d1)
+
+def _implied_vol(price, S, K, T, r, is_call):
+    if T <= 0 or price <= 0 or S <= 0 or K <= 0:
+        return 0.0
+    intrinsic = max(S - K, 0) if is_call else max(K - S, 0)
+    if price <= intrinsic + 1e-6:
+        return 0.0
+    lo, hi = 0.001, 10.0
+    for _ in range(80):
+        mid = (lo + hi) * 0.5
+        p = _bs_price(S, K, T, r, mid, is_call)
+        if p < price: lo = mid
+        else:         hi = mid
+        if hi - lo < 1e-5: break
+    return (lo + hi) * 0.5
+
+def _compute_greeks(S, K, T, r, iv, is_call):
+    """Returns dict with iv (%), delta, gamma, theta, vega."""
+    if T <= 0 or iv <= 0 or S <= 0 or K <= 0:
+        return {'iv': 0, 'delta': 0, 'gamma': 0, 'theta': 0, 'vega': 0}
+    d1 = (_math.log(S / K) + (r + 0.5 * iv**2) * T) / (iv * _math.sqrt(T))
+    d2 = d1 - iv * _math.sqrt(T)
+    nd1 = _norm_pdf(d1)
+    gamma = nd1 / (S * iv * _math.sqrt(T))
+    vega  = S * nd1 * _math.sqrt(T) / 100   # per 1% vol move
+    if is_call:
+        delta = _norm_cdf(d1)
+        theta = (-S * nd1 * iv / (2 * _math.sqrt(T))
+                 - r * K * _math.exp(-r * T) * _norm_cdf(d2)) / 365
+    else:
+        delta = _norm_cdf(d1) - 1
+        theta = (-S * nd1 * iv / (2 * _math.sqrt(T))
+                 + r * K * _math.exp(-r * T) * _norm_cdf(-d2)) / 365
+    return {
+        'iv':    round(iv * 100, 2),
+        'delta': round(delta, 4),
+        'gamma': round(gamma, 6),
+        'theta': round(theta, 4),
+        'vega':  round(vega, 4),
+    }
+
+def _enrich_chain_greeks(chain, spot, expiry_str, saved_at_str, r=0.065):
+    """Compute and inject Greeks for rows where they are missing/zero."""
+    exp_date = _parse_expiry_date(expiry_str)
+    if not exp_date or spot <= 0:
+        return chain
     try:
-        exp_resp = client.expiry(symbol=symbol, exchange=exch, instrumenttype='options')
-        expiry = (exp_resp.get('data') or [''])[0] if exp_resp.get('status') == 'success' else ''
+        saved = _datetime.fromisoformat(saved_at_str.replace('Z', '+00:00'))
+        if saved.tzinfo is None:
+            saved = saved.replace(tzinfo=_tz.utc)
+        # Expiry settlement at 15:30 IST = 10:00 UTC
+        exp_dt = _datetime(exp_date.year, exp_date.month, exp_date.day, 10, 0, 0, tzinfo=_tz.utc)
+        T = max((exp_dt - saved).total_seconds() / (365.25 * 24 * 3600), 0)
     except Exception:
-        expiry = ''
+        return chain
+
+    enriched = []
+    for row in chain:
+        strike = float(row.get('strike', 0))
+        if strike <= 0:
+            enriched.append(row); continue
+        call = dict(row.get('call', {}))
+        put  = dict(row.get('put',  {}))
+
+        if not call.get('iv') and call.get('ltp', 0) > 0:
+            iv_c = _implied_vol(call['ltp'], spot, strike, T, r, True)
+            call.update(_compute_greeks(spot, strike, T, r, iv_c, True))
+
+        if not put.get('iv') and put.get('ltp', 0) > 0:
+            iv_p = _implied_vol(put['ltp'], spot, strike, T, r, False)
+            put.update(_compute_greeks(spot, strike, T, r, iv_p, False))
+
+        enriched.append({'strike': row['strike'], 'call': call, 'put': put})
+    return enriched
+
+def _safe_listdirs(path):
+    try:
+        return sorted([d for d in os.listdir(path) if os.path.isdir(os.path.join(path, d))])
+    except FileNotFoundError:
+        return []
+
+def _hist_list_symbols():
+    """Return symbols that have at least one non-spot expiry folder."""
+    syms = []
+    try:
+        for sym in sorted(os.listdir(DATA_DIR)):
+            sym_path = os.path.join(DATA_DIR, sym)
+            if not os.path.isdir(sym_path):
+                continue
+            expiries = [d for d in os.listdir(sym_path)
+                        if os.path.isdir(os.path.join(sym_path, d)) and d != 'spot']
+            if expiries:
+                syms.append(sym)
+    except FileNotFoundError:
+        pass
+    return syms
+
+@app.route('/api/historical/symbols')
+def historical_symbols():
+    return jsonify(_hist_list_symbols())
+
+@app.route('/api/historical/expiries/<symbol>')
+def historical_expiries(symbol):
+    sym_path = os.path.join(DATA_DIR, symbol)
+    expiries = [d for d in _safe_listdirs(sym_path) if d != 'spot']
+    return jsonify(expiries)
+
+@app.route('/api/historical/dates/<symbol>/<expiry>')
+def historical_dates(symbol, expiry):
+    exp_path = os.path.join(DATA_DIR, symbol, expiry)
+    return jsonify(_safe_listdirs(exp_path))
+
+@app.route('/api/historical/times/<symbol>/<expiry>/<date>')
+def historical_times(symbol, expiry, date):
+    date_path = os.path.join(DATA_DIR, symbol, expiry, date)
+    times = []
+    try:
+        for fname in sorted(os.listdir(date_path)):
+            if not fname.endswith('.json'):
+                continue
+            # filename: {sym}_{expiry}_{date}_{HH.MM.SS.ms}.json
+            parts = fname[:-5].split('_')
+            if len(parts) >= 4:
+                t = parts[-1]  # HH.MM.SS.ms
+                tp = t.split('.')
+                if len(tp) >= 3:
+                    hh, mm, ss = tp[0], tp[1], tp[2]
+                    times.append({'time': f'{hh}:{mm}:{ss}', 'file': fname})
+    except FileNotFoundError:
+        pass
+    return jsonify(times)
+
+@app.route('/api/historical/snapshot/<symbol>/<expiry>/<date>/<time>')
+def historical_snapshot(symbol, expiry, date, time):
+    date_path = os.path.join(DATA_DIR, symbol, expiry, date)
+    # time arrives as HH:MM:SS — match to file prefix HH.MM.SS
+    t_prefix = time.replace(':', '.')
+    target_file = None
+    try:
+        for fname in sorted(os.listdir(date_path)):
+            if not fname.endswith('.json'):
+                continue
+            parts = fname[:-5].split('_')
+            if len(parts) >= 4:
+                ftime = parts[-1]  # HH.MM.SS.ms
+                if ftime.startswith(t_prefix):
+                    target_file = fname
+                    break
+    except FileNotFoundError:
+        return jsonify({'success': False, 'message': 'Date not found'}), 404
+
+    if not target_file:
+        return jsonify({'success': False, 'message': 'Snapshot not found'}), 404
+
+    try:
+        fpath = os.path.join(date_path, target_file)
+        with open(fpath) as f:
+            snap = json.load(f)
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+    exp   = snap.get('expiry', expiry)
+    spot  = snap.get('spot_price', 0)
+    chain = _enrich_chain_greeks(
+        snap.get('chain', []), spot, exp, snap.get('saved_at', '')
+    )
+    return jsonify({
+        'success':          True,
+        'symbol':           snap.get('underlying', symbol),
+        'spot_price':       snap.get('spot_price', 0),
+        'spot_prev_close':  snap.get('spot_prev_close', 0),
+        'spot_change':      snap.get('spot_change', 0),
+        'spot_pct_change':  snap.get('spot_pct_change', 0),
+        'expiry':           exp,
+        'chain':            chain,
+        'chains':           {exp: chain},
+        'availableExpiries':[exp],
+        'lot_size':         snap.get('lot_size', LOT_SIZES.get(symbol, 1)),
+        'atm':              snap.get('atm', 0),
+        'date':             date,
+        'time':             time,
+    })
+
+def _symbol_exchange(symbol):
+    from utils.option_chain import MCX_COMMODITIES
+    if symbol in MCX_COMMODITIES:  return 'MCX'
+    if symbol in BSE_INDEX_SYMS:   return 'BFO'
+    return 'NFO'
+
+def _fetch_expiry_list(symbol):
+    """Return broker's expiry list for symbol, or [] on error."""
+    try:
+        client = get_api_client()
+        resp = client.expiry(symbol=symbol, exchange=_symbol_exchange(symbol), instrumenttype='options')
+        if resp.get('status') == 'success':
+            return resp.get('data') or []
+    except Exception:
+        pass
+    return []
+
+def _get_or_init_manager(symbol, expiry=None):
+    """Get existing manager (optionally for a specific expiry) or create one."""
+    client = get_api_client()
+
+    if expiry:
+        # Specific expiry requested — find or create for that expiry
+        key = f"{symbol}_{expiry}"
+        if key in active_managers and active_managers[key].initialized:
+            return active_managers[key]
+    else:
+        # Any active manager for this symbol
+        for key, mgr in active_managers.items():
+            if mgr.underlying == symbol and mgr.initialized:
+                return mgr
+
+    # Resolve expiry if not given
+    if not expiry:
+        expiries = _fetch_expiry_list(symbol)
+        expiry = expiries[0] if expiries else ''
     if not expiry:
         return None
+
     ws  = get_or_create_websocket_manager(symbol)
     mgr = OptionChainManager(symbol, expiry, websocket_manager=ws)
     mgr.initialize(client)
     mgr.start_monitoring()
+
+    mgr.start_rest_refresh(client, interval=15)
     active_managers[f"{symbol}_{expiry}"] = mgr
     return mgr
 
+@app.route('/api/expiries/<symbol>')
+def api_expiries(symbol):
+    """Return broker's expiry list for a symbol — used by chain_saver on expiry day."""
+    expiries = _fetch_expiry_list(symbol)
+    return jsonify({'success': bool(expiries), 'expiries': expiries})
+
 @app.route('/api/live/<symbol>')
 def api_live(symbol):
-    """Return live option chain data in React app format"""
+    """Return live option chain data in React app format.
+    Optional ?expiry=DD-MON-YY to fetch a specific (e.g. next) expiry."""
     try:
-        mgr = _get_or_init_manager(symbol)
+        expiry = request.args.get('expiry') or None
+        mgr = _get_or_init_manager(symbol, expiry=expiry)
         if not mgr:
             return jsonify({'success': False, 'message': 'No data'}), 404
         payload = _build_live_payload(mgr)
@@ -626,6 +984,8 @@ def admin_latest_ticks():
 @app.route('/api/broker-status', methods=['GET'])
 def broker_status():
     """Fetch current broker name + login status from OpenAlgo"""
+    import os as _os
+    secret_path = _os.getenv('SECRET_LOGIN_PATH', 'sysadmin123')
     try:
         host = app.config.get('OPENALGO_HOST', 'http://127.0.0.1:5001')
         r = _httpx.get(f"{host}/auth/broker-config", timeout=3)
@@ -636,7 +996,7 @@ def broker_status():
             'status': 'success',
             'broker': broker,
             'logged_in': logged_in,
-            'login_url': f"{host}/auth/login",
+            'login_url': f"{host}/{secret_path}",
             'openalgo_url': host
         })
     except Exception as e:
@@ -646,6 +1006,17 @@ def broker_status():
             'logged_in': False,
             'message': str(e)
         })
+
+
+@app.route('/tick-health', methods=['GET'])
+def tick_health_proxy():
+    """Proxy to tick server health — works even when accessed via port 5800"""
+    try:
+        tick_port = int(os.getenv('SOCKETIO_PORT', '5900'))
+        r = _httpx.get(f"http://127.0.0.1:{tick_port}/health", timeout=3)
+        return jsonify(r.json())
+    except Exception as e:
+        return jsonify({'status': 'down', 'error': str(e)}), 503
 
 
 @app.route('/api/config', methods=['POST'])
@@ -906,6 +1277,27 @@ _start_snapshot_saver()
 
 # Register MongoDB auth + schedule routes
 register_auth_routes(app, scheduler_ref=_scheduler)
+
+# Pre-warm default symbol (NIFTY) so first browser request hits cached data
+def _prewarm_default():
+    """Initialize NIFTY manager in background so /api/prefetch returns instantly.
+    Retries until OpenAlgo REST API is reachable (handles delayed OpenAlgo startup)."""
+    import time as _time
+    _time.sleep(2)  # give Flask time to finish startup
+    for attempt in range(12):  # retry up to 60 seconds
+        try:
+            with app.app_context():
+                mgr = _get_or_init_manager('NIFTY')
+                if mgr:
+                    logger.info(f"Pre-warm NIFTY complete (attempt {attempt+1})")
+                    return
+                logger.debug(f"Pre-warm attempt {attempt+1}: manager not ready yet, retrying in 5s")
+        except Exception as e:
+            logger.debug(f"Pre-warm attempt {attempt+1} failed: {e}")
+        _time.sleep(5)
+    logger.warning("Pre-warm NIFTY: gave up after 60s")
+
+threading.Thread(target=_prewarm_default, daemon=True, name="prewarm-nifty").start()
 
 
 if __name__ == '__main__':

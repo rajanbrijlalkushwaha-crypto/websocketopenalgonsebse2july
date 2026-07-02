@@ -413,6 +413,77 @@ def register_auth_routes(app, scheduler_ref=None):
             pass
         return jsonify({'success': True, 'message': 'Collection stopped'})
 
+    # ── Angel One TOTP token status ───────────────────────────────────────────
+    @app.route('/api/admin/angel-status', methods=['GET'])
+    @require_admin
+    def angel_token_status():
+        """Check if Angel One TOTP auto-login has generated a valid auth token."""
+        import httpx as _hx
+        import os as _os
+
+        openalgo_host = app.config.get('OPENALGO_HOST', _os.getenv('OPENALGO_HOST', 'http://127.0.0.1:5001'))
+        api_key       = app.config.get('OPENALGO_API_KEY', _os.getenv('OPENALGO_API_KEY', ''))
+
+        result = {
+            'broker':       'angel',
+            'has_token':    False,
+            'token_valid':  False,
+            'api_reachable': False,
+            'message':      '',
+        }
+
+        # 1 — check OpenAlgo is reachable and get broker name
+        try:
+            r = _hx.get(f'{openalgo_host}/auth/broker-config', timeout=3)
+            cfg_data = r.json()
+            result['api_reachable'] = True
+            result['broker'] = cfg_data.get('broker_name', 'angel')
+        except Exception as e:
+            result['message'] = f'OpenAlgo unreachable: {e}'
+            return jsonify({'success': True, **result})
+
+        # 2 — validate token by calling funds API with the stored API key
+        if not api_key:
+            result['message'] = 'OPENALGO_API_KEY not configured in option-chain .env'
+            return jsonify({'success': True, **result})
+
+        try:
+            r = _hx.get(
+                f'{openalgo_host}/api/v1/funds',
+                headers={'x-api-key': api_key},
+                timeout=8,
+            )
+            data = r.json()
+            if data.get('status') == 'success':
+                result['has_token']   = True
+                result['token_valid'] = True
+                result['message']     = 'Token active — TOTP login successful'
+            else:
+                result['message'] = data.get('message', 'Token missing or expired — TOTP login needed')
+        except Exception as e:
+            result['message'] = f'Funds API call failed: {e}'
+
+        return jsonify({'success': True, **result})
+
+    # ── Trigger Angel TOTP auto-login immediately ─────────────────────────────
+    @app.route('/api/admin/trigger-angel-login', methods=['POST'])
+    @require_admin
+    def trigger_angel_login():
+        """Trigger Angel One TOTP auto-login right now (no wait for 08:30 schedule)."""
+        import httpx as _hx
+        import os as _os
+
+        openalgo_host = app.config.get('OPENALGO_HOST', _os.getenv('OPENALGO_HOST', 'http://127.0.0.1:5001'))
+        try:
+            r = _hx.post(f'{openalgo_host}/angel/auto-login', timeout=30)
+            data = r.json()
+            return jsonify({
+                'success': data.get('success', False),
+                'message': data.get('message', str(data)),
+            })
+        except Exception as e:
+            return jsonify({'success': False, 'message': f'Failed to reach OpenAlgo: {e}'})
+
     log.info("Auth + schedule routes registered")
 
 

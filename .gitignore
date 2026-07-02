@@ -15,12 +15,23 @@ build/
 nohup.out
 
 # Data files
-data/*.json
-data/*.db
+data/
 *.db
+*.db-shm
+*.db-wal
+
+# Env locals
+.env.local
+frontend/.env.local
+
+# Logs/images
+openalgo/log/
 
 # OS
 .DS_Store
 
 # Pipeline egg
 pipeline/pipeline.egg-info/
+
+# Tick data recordings (dated subdirectories)
+ticks/20*/

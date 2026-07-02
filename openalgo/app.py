@@ -653,6 +653,56 @@ def setup_environment(app):
             except Exception as e:
                 logger.error(f"Failed to initialize Historify scheduler: {e}")
 
+            try:
+                from services.upstox_autologin_service import init_upstox_autologin_scheduler
+
+                init_upstox_autologin_scheduler()
+                logger.debug("Upstox auto-login scheduler initialized")
+            except Exception as e:
+                logger.error(f"Failed to initialize Upstox auto-login scheduler: {e}")
+
+            try:
+                from services.angel_autologin_service import init_angel_autologin_scheduler
+
+                init_angel_autologin_scheduler()
+                logger.debug("Angel auto-login scheduler initialized")
+            except Exception as e:
+                logger.error(f"Failed to initialize Angel auto-login scheduler: {e}")
+
+            # On startup, verify the stored Angel token is still valid. If not
+            # (tokens expire at ~3 AM IST), trigger an immediate re-login so the
+            # REST quote API works without waiting for the 08:30 IST scheduler.
+            def _angel_startup_login():
+                import time as _time
+                _time.sleep(3)  # wait for broker WebSocket adapter to initialize
+                try:
+                    import os as _os, httpx as _httpx
+                    from database.auth_db import get_auth_token as _get_token
+                    tok = _get_token('rajan', 'angel')
+                    if not tok:
+                        raise ValueError("No token in DB")
+                    r = _httpx.post(
+                        'https://apiconnect.angelone.in/rest/secure/angelbroking/market/v1/quote/',
+                        headers={'Authorization': f'Bearer {tok}', 'X-PrivateKey': _os.getenv('BROKER_API_KEY',''), 'X-UserType':'USER','X-SourceID':'WEB','Content-Type':'application/json'},
+                        json={'mode':'LTP','exchangeTokens':{'NSE':['99926000']}},
+                        timeout=10,
+                    )
+                    data = r.json()
+                    if not data.get('status') or not data.get('data',{}).get('fetched'):
+                        raise ValueError(f"Token invalid: {data.get('message','unknown')}")
+                    logger.info("Angel token OK at startup (NIFTY LTP verified)")
+                except Exception as _e:
+                    logger.warning(f"Angel token invalid at startup ({_e}), re-logging in...")
+                    try:
+                        from services.angel_autologin_service import trigger_angel_autologin_now
+                        ok, msg = trigger_angel_autologin_now()
+                        logger.info(f"Angel startup re-login: {ok} — {msg}")
+                    except Exception as _e2:
+                        logger.error(f"Angel startup re-login failed: {_e2}")
+
+            import threading as _threading
+            _threading.Thread(target=_angel_startup_login, daemon=True, name="angel-startup-login").start()
+
             # Auto-reconnect the WhatsApp bot if a paired session is persisted.
             # Without this, every server restart would leave is_ready()=False
             # and every /notify call would 409 "pair first" — even though the
